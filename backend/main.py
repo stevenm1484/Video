@@ -19,7 +19,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from database import get_db, engine, Base
-from models import User, VideoAccount, Camera, Alarm, AlarmEvent, AccountClaim, Country, Group, Dealer, ActivityLog, UserActivityLog, CameraVitalSignsCheck, CameraVitalSignsStatus, Tool, ToolGroup, Apartment, Tenant
+from models import User, VideoAccount, Camera, Alarm, AlarmEvent, AccountClaim, Country, Group, Dealer, ActivityLog, UserActivityLog, CameraVitalSignsCheck, CameraVitalSignsStatus, Tool, ToolGroup, Apartment, Tenant, InboundEvent, AlarmAuditLog
 from schemas import (
     UserCreate, UserUpdate, UserResponse, Token,
     CountryCreate, CountryResponse,
@@ -837,6 +837,31 @@ async def inbound_call_webhook(request: Request, db: Session = Depends(get_db)):
                     raise HTTPException(status_code=404, detail=f"No camera or account found for phone number {lookup_number}")
                 logger.warning(f"No match for {lookup_number}, using fallback camera ID 1: {camera.name}")
 
+        # LOG INBOUND EVENT (before creating alarm event)
+        # This captures ALL call events regardless of any future filtering
+        inbound_event = InboundEvent(
+            camera_id=camera.id,
+            account_id=camera.account_id if camera else None,
+            timestamp=datetime.utcnow(),
+            source_type="call",
+            source_identifier=caller_id_num,
+            media_type="call",
+            outcome="pending",  # Will be updated after alarm event created
+            call_uniqueid=call_uniqueid,
+            caller_id_num=caller_id_num,
+            caller_id_name=caller_id_name,
+            raw_payload={
+                "uniqueid": call_uniqueid,
+                "caller_id_num": caller_id_num,
+                "caller_id_name": caller_id_name,
+                "parked_slot": parked_slot,
+                "parked_lot": parked_lot,
+                "timeout_sec": timeout_sec
+            }
+        )
+        db.add(inbound_event)
+        db.flush()  # Get the ID without committing
+
         # Create alarm event with call metadata
         db_event = AlarmEvent(
             camera_id=camera.id,
@@ -856,6 +881,37 @@ async def inbound_call_webhook(request: Request, db: Session = Depends(get_db)):
         db.add(db_event)
         db.commit()
         db.refresh(db_event)
+
+        # Update inbound event with success outcome and link to alarm event
+        inbound_event.outcome = "pending_created"
+        inbound_event.outcome_reason = "AlarmEvent created successfully from call"
+        inbound_event.alarm_event_id = db_event.id
+        db.commit()
+
+        # Broadcast inbound event to WebSocket clients
+        try:
+            account = db.query(VideoAccount).filter(VideoAccount.id == camera.account_id).first()
+            await manager.broadcast({
+                "type": "inbound_event",
+                "event": {
+                    "id": inbound_event.id,
+                    "camera_id": inbound_event.camera_id,
+                    "camera_name": camera.name,
+                    "account_id": inbound_event.account_id,
+                    "account_name": account.name if account else "Unknown",
+                    "timestamp": inbound_event.timestamp.isoformat(),
+                    "source_type": inbound_event.source_type,
+                    "source_identifier": inbound_event.source_identifier,
+                    "media_type": inbound_event.media_type,
+                    "outcome": inbound_event.outcome,
+                    "outcome_reason": inbound_event.outcome_reason,
+                    "alarm_event_id": inbound_event.alarm_event_id,
+                    "caller_id_num": inbound_event.caller_id_num,
+                    "caller_id_name": inbound_event.caller_id_name
+                }
+            })
+        except Exception as e:
+            logger.error(f"Error broadcasting inbound event: {e}")
 
         logger.info(f"Created alarm event {db_event.id} for call from {caller_id_num}")
 
@@ -2292,6 +2348,119 @@ async def get_camera_activity_stats(
         "account_activity_snooze_threshold": account.activity_snooze_threshold if account else None
     }
 
+@app.get("/api/billing-report")
+async def get_billing_report(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    account_id: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Generate billing report for activity tracking"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import and_
+
+    try:
+        # Default to current month if no dates provided
+        if not start_date:
+            now = datetime.now()
+            start_date = datetime(now.year, now.month, 1).strftime('%Y-%m-%d')
+        if not end_date:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+
+        # Convert string dates to datetime
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+
+        # Get accessible accounts based on user role (same logic as get_accounts)
+        user_group_ids = current_user.group_ids if isinstance(current_user.group_ids, list) else (json.loads(current_user.group_ids) if current_user.group_ids else [])
+        user_dealer_ids = current_user.dealer_ids if isinstance(current_user.dealer_ids, list) else (json.loads(current_user.dealer_ids) if current_user.dealer_ids else [])
+        user_customer_ids = current_user.customer_ids if isinstance(current_user.customer_ids, list) else (json.loads(current_user.customer_ids) if current_user.customer_ids else [])
+        user_video_types = current_user.video_types if isinstance(current_user.video_types, list) else (json.loads(current_user.video_types) if current_user.video_types else [])
+
+        # Build query based on user's hierarchy
+        if current_user.role in ["super_admin", "country_admin"] or current_user.access_level in ["super_admin", "country"]:
+            query = db.query(VideoAccount)
+        elif user_customer_ids:
+            query = db.query(VideoAccount).filter(VideoAccount.id.in_(user_customer_ids))
+        elif user_dealer_ids:
+            query = db.query(VideoAccount).filter(VideoAccount.dealer_id.in_(user_dealer_ids))
+        elif user_group_ids:
+            query = db.query(VideoAccount).filter(VideoAccount.group_id.in_(user_group_ids))
+        else:
+            # User has no assignments - return empty report
+            return {
+                "report_date": datetime.now().isoformat(),
+                "period_start": start_date,
+                "period_end": end_date,
+                "total_accounts": 0,
+                "total_events": 0,
+                "accounts": []
+            }
+
+        # Apply specific account filter if provided
+        if account_id:
+            query = query.filter(VideoAccount.id == account_id)
+
+        accounts = query.all()
+
+        # Apply video type filter if user has video_types specified
+        if user_video_types and len(user_video_types) > 0:
+            accounts = [acc for acc in accounts if acc.video_type is not None and acc.video_type in user_video_types]
+
+        report_data = []
+        total_events = 0
+
+        for account in accounts:
+            # Get cameras for this account
+            cameras = db.query(Camera).filter(Camera.account_id == account.id).all()
+
+            camera_breakdown = []
+            account_total_events = account.monthly_event_count or 0
+
+            for camera in cameras:
+                camera_events = camera.monthly_event_count or 0
+                camera_breakdown.append({
+                    "camera_id": camera.id,
+                    "camera_name": camera.name,
+                    "camera_number": camera.camera_number,
+                    "event_count": camera_events,
+                    "warning_threshold": camera.activity_threshold_warning or account.activity_threshold_warning,
+                    "snooze_threshold": camera.activity_snooze_threshold or account.activity_snooze_threshold,
+                    "is_auto_snoozed": camera.activity_auto_snoozed_at is not None,
+                    "auto_snoozed_at": camera.activity_auto_snoozed_at.isoformat() if camera.activity_auto_snoozed_at else None
+                })
+
+            total_events += account_total_events
+
+            report_data.append({
+                "account_id": account.id,
+                "account_name": account.name,
+                "account_number": account.account_number,
+                "total_events": account_total_events,
+                "warning_threshold": account.activity_threshold_warning,
+                "snooze_threshold": account.activity_snooze_threshold,
+                "is_auto_snoozed": account.activity_auto_snoozed_at is not None,
+                "auto_snoozed_at": account.activity_auto_snoozed_at.isoformat() if account.activity_auto_snoozed_at else None,
+                "billing_period_start": account.activity_billing_period_start.isoformat() if account.activity_billing_period_start else None,
+                "billing_period_end": account.activity_billing_period_end.isoformat() if account.activity_billing_period_end else None,
+                "camera_count": len(cameras),
+                "cameras": camera_breakdown
+            })
+
+        return {
+            "report_date": datetime.now().isoformat(),
+            "period_start": start_date,
+            "period_end": end_date,
+            "total_accounts": len(report_data),
+            "total_events": total_events,
+            "accounts": report_data
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating billing report: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate billing report: {str(e)}")
+
 # Camera endpoints
 @app.post("/api/cameras", response_model=CameraResponse)
 async def create_camera(
@@ -2591,6 +2760,125 @@ async def capture_snapshot(
     else:
         raise HTTPException(status_code=500, detail="Failed to capture snapshot")
 
+@app.post("/api/events/{event_id}/capture-live-view")
+async def capture_live_view_for_event(
+    event_id: int,
+    camera_id: int,
+    duration_seconds: int = 10,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Capture a live view clip from a camera during an alarm event"""
+    # Validate event exists
+    event = db.query(AlarmEvent).filter(AlarmEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # Validate camera exists
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    if not camera.rtsp_url:
+        raise HTTPException(status_code=400, detail="Camera has no RTSP URL configured")
+
+    # Limit duration to reasonable range (5-30 seconds)
+    duration_seconds = max(5, min(duration_seconds, 30))
+
+    # Build RTSP URL with credentials
+    rtsp_url = build_rtsp_url_with_credentials(camera)
+
+    # Create output directory
+    output_dir = "uploads/live_captures"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"event_{event_id}_camera_{camera_id}_{timestamp}.mp4"
+    output_path = os.path.join(output_dir, output_filename)
+
+    # Capture video clip using ffmpeg
+    try:
+        import subprocess
+
+        # Use ffmpeg to capture clip from RTSP stream
+        # -rtsp_transport tcp: Use TCP for more reliable connection
+        # -i: Input RTSP URL
+        # -t: Duration in seconds
+        # -c:v: Video codec (copy = direct stream copy, faster)
+        # -c:a: Audio codec (copy = direct stream copy)
+        cmd = [
+            "ffmpeg",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-t", str(duration_seconds),
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-y",  # Overwrite output file if exists
+            output_path
+        ]
+
+        logger.info(f"Capturing {duration_seconds}s clip from camera {camera_id} for event {event_id}")
+
+        # Run ffmpeg with timeout
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        try:
+            # Wait for capture to complete (with timeout = duration + 10s buffer)
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=duration_seconds + 10
+            )
+
+            if process.returncode != 0:
+                error_msg = stderr.decode('utf-8') if stderr else "Unknown error"
+                logger.error(f"FFmpeg capture failed: {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Failed to capture video: {error_msg}")
+
+            # Verify file was created and has content
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                raise HTTPException(status_code=500, detail="Capture file not created or empty")
+
+            # Add capture info to event's live_view_captures array
+            capture_info = {
+                "camera_id": camera_id,
+                "camera_name": camera.name,
+                "capture_timestamp": datetime.utcnow().isoformat(),
+                "clip_path": output_path,
+                "duration_seconds": duration_seconds,
+                "captured_by": current_user.id
+            }
+
+            # Update event's live_view_captures
+            if event.live_view_captures is None:
+                event.live_view_captures = []
+
+            event.live_view_captures.append(capture_info)
+            db.commit()
+
+            logger.info(f"Live view capture saved: {output_path}")
+
+            return {
+                "message": "Live view captured successfully",
+                "clip_url": f"/{output_path}",
+                "duration_seconds": duration_seconds,
+                "capture_info": capture_info
+            }
+
+        except asyncio.TimeoutError:
+            # Kill the process if it's taking too long
+            process.kill()
+            await process.wait()
+            raise HTTPException(status_code=500, detail="Capture timeout")
+
+    except Exception as e:
+        logger.error(f"Error capturing live view: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to capture live view: {str(e)}")
+
 # Snooze endpoints
 @app.post("/api/cameras/{camera_id}/snooze", response_model=SnoozeResponse)
 async def snooze_camera(
@@ -2717,6 +3005,85 @@ async def get_events(
     if status:
         query = query.filter(AlarmEvent.status == status)
     return query.order_by(AlarmEvent.timestamp.desc()).all()
+
+@app.get("/api/inbound-events")
+async def get_inbound_events(
+    limit: int = 100,
+    outcome: Optional[str] = None,
+    source_type: Optional[str] = None,
+    camera_id: Optional[int] = None,
+    account_id: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get inbound events log with optional filters"""
+    # Parse user's assigned IDs for filtering
+    user_group_ids = current_user.group_ids if isinstance(current_user.group_ids, list) else (json.loads(current_user.group_ids) if current_user.group_ids else [])
+    user_dealer_ids = current_user.dealer_ids if isinstance(current_user.dealer_ids, list) else (json.loads(current_user.dealer_ids) if current_user.dealer_ids else [])
+    user_customer_ids = current_user.customer_ids if isinstance(current_user.customer_ids, list) else (json.loads(current_user.customer_ids) if current_user.customer_ids else [])
+
+    # Build base query
+    query = db.query(InboundEvent).join(Camera, InboundEvent.camera_id == Camera.id, isouter=True).join(VideoAccount, InboundEvent.account_id == VideoAccount.id, isouter=True)
+
+    # Apply filters
+    if outcome:
+        query = query.filter(InboundEvent.outcome == outcome)
+    if source_type:
+        query = query.filter(InboundEvent.source_type == source_type)
+    if camera_id:
+        query = query.filter(InboundEvent.camera_id == camera_id)
+    if account_id:
+        query = query.filter(InboundEvent.account_id == account_id)
+
+    # Apply access control based on user's hierarchy
+    if current_user.role not in ["super_admin", "country_admin"] and current_user.access_level not in ["super_admin", "country"]:
+        if user_customer_ids:
+            query = query.filter(VideoAccount.id.in_(user_customer_ids))
+        elif user_dealer_ids:
+            query = query.filter(VideoAccount.dealer_id.in_(user_dealer_ids))
+        elif user_group_ids:
+            query = query.filter(VideoAccount.group_id.in_(user_group_ids))
+        else:
+            # User has no assignments - return empty
+            return []
+
+    # Get events with limit
+    inbound_events = query.order_by(InboundEvent.timestamp.desc()).limit(limit).all()
+
+    # Format response
+    result = []
+    for event in inbound_events:
+        camera = db.query(Camera).filter(Camera.id == event.camera_id).first() if event.camera_id else None
+        account = db.query(VideoAccount).filter(VideoAccount.id == event.account_id).first() if event.account_id else None
+
+        result.append({
+            "id": event.id,
+            "camera_id": event.camera_id,
+            "camera_name": camera.name if camera else "Unknown",
+            "account_id": event.account_id,
+            "account_name": account.name if account else "Unknown",
+            "account_number": account.account_number if account else None,
+            "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+            "source_type": event.source_type,
+            "source_identifier": event.source_identifier,
+            "media_type": event.media_type,
+            "media_paths": event.media_paths if isinstance(event.media_paths, list) else [],
+            "outcome": event.outcome,
+            "outcome_reason": event.outcome_reason,
+            "alarm_event_id": event.alarm_event_id,
+            "call_uniqueid": event.call_uniqueid,
+            "caller_id_num": event.caller_id_num,
+            "caller_id_name": event.caller_id_name,
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+            # Final outcome fields
+            "final_outcome": event.final_outcome,
+            "final_outcome_at": event.final_outcome_at.isoformat() if event.final_outcome_at else None,
+            "alarm_id": event.alarm_id,
+            "alarm_resolution": event.alarm_resolution,
+            "alarm_resolved_at": event.alarm_resolved_at.isoformat() if event.alarm_resolved_at else None
+        })
+
+    return result
 
 @app.get("/api/dashboard-items")
 async def get_dashboard_items(
@@ -3330,12 +3697,33 @@ async def dismiss_event(
             }
         )
 
+        # Update inbound event with final outcome
+        inbound_event = db.query(InboundEvent).filter(InboundEvent.alarm_event_id == event_id).first()
+        if inbound_event:
+            inbound_event.final_outcome = "dismissed"
+            inbound_event.final_outcome_at = now
+            inbound_event.final_outcome_by = current_user.id
+            inbound_event.outcome_reason = (inbound_event.outcome_reason or "") + f" → Dismissed: {resolution}"
+
         db.commit()
 
+        # Broadcast event dismissal
         await manager.broadcast({
             "type": "event_dismissed",
             "event_id": event_id
         })
+
+        # Broadcast inbound event update for real-time Event Log
+        if inbound_event:
+            await manager.broadcast({
+                "type": "inbound_event_updated",
+                "event": {
+                    "id": inbound_event.id,
+                    "final_outcome": "dismissed",
+                    "final_outcome_at": inbound_event.final_outcome_at.isoformat() if inbound_event.final_outcome_at else None,
+                    "outcome_reason": inbound_event.outcome_reason
+                }
+            })
 
         return {
             "message": "Event dismissed successfully",
@@ -3425,6 +3813,19 @@ async def escalate_event(
         )
         db.add(alarm)
 
+    # Update inbound event with final outcome
+    from audit_helper import log_audit_action
+    now = datetime.utcnow()
+    inbound_event = db.query(InboundEvent).filter(InboundEvent.alarm_event_id == event_id).first()
+    if inbound_event:
+        inbound_event.final_outcome = "alarm_created"
+        inbound_event.final_outcome_at = now
+        inbound_event.final_outcome_by = current_user.id
+        escalation_note = f" → Escalated to alarm by {current_user.username}"
+        if escalate_data.notes:
+            escalation_note += f": {escalate_data.notes}"
+        inbound_event.outcome_reason = (inbound_event.outcome_reason or "") + escalation_note
+
     db.commit()
 
     # Broadcast to all connected clients
@@ -3432,6 +3833,18 @@ async def escalate_event(
         "type": "event_escalated",
         "event_id": event_id
     })
+
+    # Broadcast inbound event update for real-time Event Log
+    if inbound_event:
+        await manager.broadcast({
+            "type": "inbound_event_updated",
+            "event": {
+                "id": inbound_event.id,
+                "final_outcome": "alarm_created",
+                "final_outcome_at": inbound_event.final_outcome_at.isoformat() if inbound_event.final_outcome_at else None,
+                "outcome_reason": inbound_event.outcome_reason
+            }
+        })
 
     return {
         "message": "Event escalated successfully",
@@ -3514,6 +3927,17 @@ async def hold_event(
         details={"notes": hold_data.notes if hold_data.notes else None}
     )
 
+    # Update inbound event with final outcome
+    inbound_event = db.query(InboundEvent).filter(InboundEvent.alarm_event_id == event_id).first()
+    if inbound_event:
+        inbound_event.final_outcome = "on_hold"
+        inbound_event.final_outcome_at = now
+        inbound_event.final_outcome_by = current_user.id
+        hold_note = f" → Put on hold by {current_user.username}"
+        if hold_data.notes:
+            hold_note += f": {hold_data.notes}"
+        inbound_event.outcome_reason = (inbound_event.outcome_reason or "") + hold_note
+
     db.commit()
 
     # Broadcast to all connected clients
@@ -3521,6 +3945,18 @@ async def hold_event(
         "type": "event_held",
         "event_id": event_id
     })
+
+    # Broadcast inbound event update for real-time Event Log
+    if inbound_event:
+        await manager.broadcast({
+            "type": "inbound_event_updated",
+            "event": {
+                "id": inbound_event.id,
+                "final_outcome": "on_hold",
+                "final_outcome_at": inbound_event.final_outcome_at.isoformat() if inbound_event.final_outcome_at else None,
+                "outcome_reason": inbound_event.outcome_reason
+            }
+        })
 
     return {
         "message": "Event put on hold successfully",
@@ -3618,6 +4054,7 @@ async def hold_alarm(
 @app.put("/api/alarms/{alarm_id}/viewed")
 async def mark_alarm_viewed(
     alarm_id: int,
+    session_id: str = None,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -3640,7 +4077,7 @@ async def mark_alarm_viewed(
         event.viewed_by = current_user.id
         event.viewed_at = now
 
-    # Log audit action
+    # Log audit action with session_id
     log_audit_action(
         db=db,
         action="alarm_viewed",
@@ -3648,7 +4085,8 @@ async def mark_alarm_viewed(
         username=current_user.username,
         event_id=alarm.event_id,
         alarm_id=alarm_id,
-        details=None
+        details=None,
+        session_id=session_id
     )
 
     db.commit()
@@ -3726,6 +4164,14 @@ async def unhold_event(
         event_id=event_id,
         details=None
     )
+
+    # Update inbound event - clear final outcome since it's back to active
+    inbound_event = db.query(InboundEvent).filter(InboundEvent.alarm_event_id == event_id).first()
+    if inbound_event:
+        inbound_event.final_outcome = None
+        inbound_event.final_outcome_at = None
+        inbound_event.final_outcome_by = None
+        inbound_event.outcome_reason = (inbound_event.outcome_reason or "") + f" → Unheld by {current_user.username}"
 
     db.commit()
 
@@ -3845,6 +4291,19 @@ async def generate_alarm(
         }
     )
 
+    # Update inbound event with final outcome for alarm creation
+    inbound_events_to_broadcast = []
+    for evt_id in all_event_ids:
+        inbound_event = db.query(InboundEvent).filter(InboundEvent.alarm_event_id == evt_id).first()
+        if inbound_event:
+            inbound_event.final_outcome = "alarm_created"
+            inbound_event.final_outcome_at = now
+            inbound_event.final_outcome_by = current_user.id
+            inbound_event.alarm_id = db_alarm.id
+            inbound_event.outcome_reason = (inbound_event.outcome_reason or "") + f" → Alarm #{db_alarm.id} created"
+            inbound_events_to_broadcast.append(inbound_event)
+    db.commit()
+
     # Broadcast account claim FIRST
     await manager.broadcast({
         "type": "account_claimed",
@@ -3878,6 +4337,19 @@ async def generate_alarm(
             } if camera else None
         }
     })
+
+    # Broadcast inbound event updates for real-time Event Log
+    for inbound_event in inbound_events_to_broadcast:
+        await manager.broadcast({
+            "type": "inbound_event_updated",
+            "event": {
+                "id": inbound_event.id,
+                "final_outcome": "alarm_created",
+                "final_outcome_at": inbound_event.final_outcome_at.isoformat() if inbound_event.final_outcome_at else None,
+                "alarm_id": inbound_event.alarm_id,
+                "outcome_reason": inbound_event.outcome_reason
+            }
+        })
 
     return db_alarm
 
@@ -4086,6 +4558,19 @@ async def resolve_alarm(
             }
         )
 
+        # Update inbound events with final alarm resolution
+        inbound_events_to_broadcast = []
+        for event_id in related_event_ids:
+            inbound_event = db.query(InboundEvent).filter(InboundEvent.alarm_event_id == event_id).first()
+            if inbound_event:
+                inbound_event.final_outcome = "alarm_resolved"
+                inbound_event.final_outcome_at = now
+                inbound_event.final_outcome_by = current_user.id
+                inbound_event.alarm_resolution = alarm_update.resolution
+                inbound_event.alarm_resolved_at = now
+                inbound_event.outcome_reason = (inbound_event.outcome_reason or "") + f" → Alarm #{alarm_id} resolved: {alarm_update.resolution}"
+                inbound_events_to_broadcast.append(inbound_event)
+
         # Release the account claim when alarm is resolved
         existing_claim = db.query(AccountClaim).filter(AccountClaim.account_id == camera.account_id).first()
         if existing_claim:
@@ -4100,6 +4585,19 @@ async def resolve_alarm(
             "event_id": alarm.event_id,
             "related_event_ids": related_event_ids
         })
+
+        # Broadcast inbound event updates for real-time Event Log
+        for inbound_event in inbound_events_to_broadcast:
+            await manager.broadcast({
+                "type": "inbound_event_updated",
+                "event": {
+                    "id": inbound_event.id,
+                    "final_outcome": "alarm_resolved",
+                    "final_outcome_at": inbound_event.final_outcome_at.isoformat() if inbound_event.final_outcome_at else None,
+                    "alarm_resolution": inbound_event.alarm_resolution,
+                    "outcome_reason": inbound_event.outcome_reason
+                }
+            })
 
         return {
             "message": "Alarm resolved successfully",
@@ -4176,6 +4674,86 @@ async def revert_alarm_to_pending(
     })
 
     return {"message": "Alarm reverted to pending event"}
+
+@app.post("/api/alarms/{alarm_id}/retrieve-call-recording")
+async def retrieve_call_recording_for_alarm(
+    alarm_id: int,
+    call_log_index: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve call recording for a manual call (outbound call made via JsSIP).
+    Uses timestamp-based search to find the recording on the PBX.
+    """
+    from recording_retrieval import RecordingRetrieval
+
+    # Get the alarm
+    alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
+    if not alarm:
+        raise HTTPException(status_code=404, detail="Alarm not found")
+
+    # Get call logs
+    call_logs = alarm.call_logs if isinstance(alarm.call_logs, list) else (json.loads(alarm.call_logs) if alarm.call_logs else [])
+
+    if call_log_index >= len(call_logs):
+        raise HTTPException(status_code=404, detail="Call log not found")
+
+    call_log = call_logs[call_log_index]
+
+    # Check if recording already exists
+    if call_log.get("recording_url"):
+        return {"message": "Recording already exists", "recording_url": call_log["recording_url"]}
+
+    # Get call timestamp
+    call_start = call_log.get("call_start")
+    if not call_start:
+        raise HTTPException(status_code=400, detail="Call log missing call_start timestamp")
+
+    # Parse timestamp
+    from dateutil import parser as date_parser
+    try:
+        call_timestamp = date_parser.isoparse(call_start) if isinstance(call_start, str) else call_start
+    except Exception as e:
+        logger.error(f"Failed to parse call timestamp: {e}")
+        raise HTTPException(status_code=400, detail="Invalid call_start timestamp")
+
+    try:
+        logger.info(f"Retrieving recording for alarm {alarm_id}, call log {call_log_index}, timestamp: {call_timestamp}")
+
+        # Initialize recording retrieval
+        retrieval = RecordingRetrieval()
+
+        # Search for recording by timestamp (±120 seconds)
+        remote_path = await retrieval.find_recording_by_timestamp(call_timestamp, time_window=120)
+
+        if not remote_path:
+            logger.warning(f"Could not find recording for call at {call_timestamp}")
+            return {"message": "Recording not found", "recording_url": None}
+
+        # Download the recording
+        local_path = await retrieval.download_recording(remote_path)
+
+        if not local_path:
+            logger.error(f"Failed to download recording from {remote_path}")
+            raise HTTPException(status_code=500, detail="Failed to download recording")
+
+        # Update call log with recording URL
+        call_log["recording_url"] = f"/api/media/{local_path}"
+        alarm.call_logs = call_logs
+        flag_modified(alarm, "call_logs")
+        db.commit()
+
+        logger.info(f"Successfully attached recording to alarm {alarm_id}, call log {call_log_index}: {local_path}")
+
+        return {
+            "message": "Recording retrieved successfully",
+            "recording_url": f"/api/media/{local_path}"
+        }
+
+    except Exception as e:
+        logger.error(f"Error retrieving call recording: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve recording: {str(e)}")
 
 # Account Claim endpoints
 @app.post("/api/accounts/{account_id}/claim")
@@ -6020,6 +6598,191 @@ async def get_alarm_audit_logs(
         logger.error(f"Error fetching audit logs: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch audit logs")
 
+@app.get("/api/alarms/{alarm_id}/timeline")
+async def get_alarm_timeline(
+    alarm_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get comprehensive timeline for an alarm including:
+    - Event received timestamp
+    - All audit log actions (viewed, held, escalated, resolved, etc.)
+    - Tool activations
+    - Phone calls made
+    - Voice recordings
+    - Notes added
+
+    Returns a unified, chronologically sorted timeline of all activities.
+    """
+    try:
+        # Get the alarm and related event
+        alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
+        if not alarm:
+            raise HTTPException(status_code=404, detail="Alarm not found")
+
+        event = db.query(AlarmEvent).filter(AlarmEvent.id == alarm.event_id).first()
+        timeline_items = []
+
+        # 1. Add initial event received timestamp
+        if event:
+            timeline_items.append({
+                "id": f"event_received_{event.id}",
+                "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                "action": "event_received",
+                "username": None,
+                "details": {
+                    "camera_id": event.camera_id,
+                    "media_type": event.media_type,
+                    "media_count": len(event.media_paths) if event.media_paths else 0
+                }
+            })
+
+        # 2. Add all audit log entries for this event
+        # Show ALL actions that happened during event lifecycle
+        # Only filter out duplicate "alarm_viewed" from history reviews (use first session_id for views)
+        audit_logs = db.query(AlarmAuditLog).filter(
+            AlarmAuditLog.event_id == event.id  # Use event_id to get complete lifecycle
+        ).order_by(AlarmAuditLog.timestamp).all()
+
+        # Track which session_id had the first "alarm_viewed" to filter history reviews
+        first_view_session_id = None
+        seen_alarm_viewed = False
+
+        for log in audit_logs:
+            # Special handling for "alarm_viewed" - only show the FIRST one
+            if log.action == 'alarm_viewed':
+                if not seen_alarm_viewed:
+                    # This is the first view - include it and remember the session
+                    first_view_session_id = log.session_id
+                    seen_alarm_viewed = True
+                    timeline_items.append({
+                        "id": f"audit_{log.id}",
+                        "timestamp": log.timestamp.isoformat(),
+                        "action": log.action,
+                        "username": log.username,
+                        "details": log.details or {}
+                    })
+                else:
+                    # This is a subsequent "alarm_viewed" from reviewing history - skip it
+                    continue
+            elif log.action == 'alarm_resolved':
+                # Skip "alarm_resolved" audit log - we'll show it as final_resolution card at bottom
+                continue
+            elif log.action == 'event_dismissed' and log.details and log.details.get('via_alarm_resolution'):
+                # Skip auto-dismissals from alarm resolution - redundant with final_resolution card
+                continue
+            else:
+                # For all other actions (calls, tools, escalation, etc.), include them
+                # These are actual actions taken on the event, not just viewing history
+                timeline_items.append({
+                    "id": f"audit_{log.id}",
+                    "timestamp": log.timestamp.isoformat(),
+                    "action": log.action,
+                    "username": log.username,
+                    "details": log.details or {}
+                })
+
+        # 3. Add call logs from alarm.call_logs JSON field
+        # Group call as single item: initiated (main) with outcome/notes as nested details
+        if alarm.call_logs:
+            for idx, call_log in enumerate(alarm.call_logs):
+                call_start = call_log.get("call_start") or call_log.get("timestamp")
+                if call_start:
+                    outcome = call_log.get("resolution") or call_log.get("outcome")
+                    call_end = call_log.get("call_end") or call_log.get("end_time")
+
+                    # Create single call entry with outcome/notes as nested details
+                    timeline_items.append({
+                        "id": f"call_{alarm_id}_{idx}",
+                        "timestamp": call_start,
+                        "action": "phone_call",
+                        "username": call_log.get("operator"),
+                        "details": {
+                            "contact_name": call_log.get("contact_name") or call_log.get("contact"),
+                            "phone_number": call_log.get("contact_phone") or call_log.get("phone"),
+                            "outcome": outcome,
+                            "duration": call_log.get("duration"),
+                            "recording_url": call_log.get("recording_url"),
+                            "notes": call_log.get("notes"),
+                            "call_type": call_log.get("type", "manual"),
+                            "call_end": call_end
+                        }
+                    })
+
+        # 4. Check for PBX call events (from alarm_events table for phone calls)
+        if event and event.media_type == 'call' and event.call_uniqueid:
+            # Add call parked event
+            if event.parked_slot:
+                timeline_items.append({
+                    "id": f"call_parked_{event.id}",
+                    "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                    "action": "phone_call_parked",
+                    "username": None,
+                    "details": {
+                        "caller_id": event.caller_id_num,
+                        "parked_slot": event.parked_slot,
+                        "unique_id": event.call_uniqueid
+                    }
+                })
+
+            # Add call retrieved event
+            if event.call_retrieved_at:
+                retrieved_user = db.query(User).filter(User.id == event.call_retrieved_by).first() if event.call_retrieved_by else None
+                timeline_items.append({
+                    "id": f"call_retrieved_{event.id}",
+                    "timestamp": event.call_retrieved_at.isoformat(),
+                    "action": "phone_call_retrieved",
+                    "username": retrieved_user.username if retrieved_user else None,
+                    "details": {
+                        "parked_slot": event.parked_slot,
+                        "unique_id": event.call_uniqueid
+                    }
+                })
+
+            # Check for voice recording in media_paths
+            if event.media_paths:
+                for media_path in event.media_paths:
+                    if isinstance(media_path, str) and ('.wav' in media_path or '.mp3' in media_path or 'recordings' in media_path):
+                        timeline_items.append({
+                            "id": f"recording_{event.id}",
+                            "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                            "action": "recording_available",
+                            "username": None,
+                            "details": {
+                                "recording_url": f"/api/media/{media_path}",
+                                "unique_id": event.call_uniqueid
+                            }
+                        })
+
+        # Notes are already shown in the final resolution card, no need to add them here
+
+        # Sort all timeline items by timestamp (oldest first, chronological order)
+        timeline_items.sort(key=lambda x: x["timestamp"] if x["timestamp"] else "0000-01-01T00:00:00", reverse=False)
+
+        # Add final resolution card at the end (bottom) if alarm is resolved
+        if alarm.resolved_at:
+            resolved_user = db.query(User).filter(User.id == alarm.resolved_by).first() if alarm.resolved_by else None
+            timeline_items.append({
+                "id": f"final_resolution_{alarm_id}",
+                "timestamp": alarm.resolved_at.isoformat(),
+                "action": "final_resolution",
+                "username": resolved_user.username if resolved_user else None,
+                "details": {
+                    "resolution": alarm.resolution,
+                    "notes": alarm.notes,
+                    "eyes_on_count": len(alarm.eyes_on_users) if alarm.eyes_on_users else 0
+                }
+            })
+
+        return timeline_items
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching alarm timeline: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch alarm timeline: {str(e)}")
+
 # ==================== VITAL SIGNS MONITORING ENDPOINTS ====================
 
 @app.get("/api/vital-signs/cameras/{camera_id}/status", response_model=VitalSignsStatusResponse)
@@ -6416,6 +7179,24 @@ async def get_dashboard_stats(
             # Sort by days inactive (descending)
             inactive_accounts.sort(key=lambda x: x['days_inactive'], reverse=True)
 
+        # Get auto-snoozed accounts (activity threshold reached)
+        auto_snoozed_accounts = []
+        if accessible_account_ids:
+            snoozed = db.query(VideoAccount).filter(
+                VideoAccount.id.in_(accessible_account_ids),
+                VideoAccount.activity_auto_snoozed_at.isnot(None)
+            ).all()
+
+            for account in snoozed:
+                auto_snoozed_accounts.append({
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "account_number": account.account_number,
+                    "monthly_event_count": account.monthly_event_count,
+                    "activity_snooze_threshold": account.activity_snooze_threshold,
+                    "activity_auto_snoozed_at": account.activity_auto_snoozed_at.isoformat() if account.activity_auto_snoozed_at else None
+                })
+
         return {
             "vital_signs": {
                 "active_accounts": active_accounts_count,
@@ -6424,7 +7205,8 @@ async def get_dashboard_stats(
                 "activity_24h": activity_24h
             },
             "top_active_accounts": top_active_accounts,
-            "inactive_accounts": inactive_accounts
+            "inactive_accounts": inactive_accounts,
+            "auto_snoozed_accounts": auto_snoozed_accounts
         }
 
     except Exception as e:
@@ -6564,6 +7346,8 @@ async def trigger_tool(
     tool_id: int,
     relay_number: int = None,
     state: int = None,
+    alarm_id: int = None,
+    event_id: int = None,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -6572,6 +7356,7 @@ async def trigger_tool(
     For CBW relays, relay_number can be passed as a query parameter to trigger a specific relay.
     If not provided, defaults to relay 1.
     For static mode relays, state can be 0 (OFF) or 1 (ON). If not provided, uses pulse mode behavior.
+    alarm_id and event_id can be passed for audit logging when triggered from alarm detail page.
     """
     try:
         tool = db.query(Tool).filter(Tool.id == tool_id).first()
@@ -6682,6 +7467,27 @@ async def trigger_tool(
                 message = f"Relay {relay_num} {mode_text}"
 
             logger.info(f"CBW Relay {mode_text} successfully: {tool.name} (relay {relay_num})")
+
+            # Log audit action if triggered from alarm detail
+            if event_id or alarm_id:
+                from audit_helper import log_audit_action
+                log_audit_action(
+                    db=db,
+                    action="tool_triggered",
+                    user_id=current_user.id,
+                    username=current_user.username,
+                    event_id=event_id,
+                    alarm_id=alarm_id,
+                    details={
+                        "tool_name": tool.name,
+                        "tool_id": tool_id,
+                        "tool_type": tool.tool_type,
+                        "relay_number": relay_num,
+                        "relay_description": relay_config.get("description", f"Relay {relay_num}"),
+                        "mode": mode_text
+                    }
+                )
+
             return {
                 "success": True,
                 "message": message,
@@ -6715,6 +7521,26 @@ async def trigger_tool(
                 response.raise_for_status()
 
             logger.info(f"Webhook triggered successfully: {tool.name}")
+
+            # Log audit action if triggered from alarm detail
+            if event_id or alarm_id:
+                from audit_helper import log_audit_action
+                log_audit_action(
+                    db=db,
+                    action="tool_triggered",
+                    user_id=current_user.id,
+                    username=current_user.username,
+                    event_id=event_id,
+                    alarm_id=alarm_id,
+                    details={
+                        "tool_name": tool.name,
+                        "tool_id": tool_id,
+                        "tool_type": tool.tool_type,
+                        "webhook_url": url,
+                        "method": method
+                    }
+                )
+
             return {
                 "success": True,
                 "message": "Webhook executed",
@@ -6768,6 +7594,26 @@ async def trigger_tool(
                     })
 
             logger.info(f"Camera view tool triggered: {tool.name} (view_type: {view_type}, cameras: {camera_ids})")
+
+            # Log audit action if triggered from alarm detail
+            if event_id or alarm_id:
+                from audit_helper import log_audit_action
+                log_audit_action(
+                    db=db,
+                    action="tool_triggered",
+                    user_id=current_user.id,
+                    username=current_user.username,
+                    event_id=event_id,
+                    alarm_id=alarm_id,
+                    details={
+                        "tool_name": tool.name,
+                        "tool_id": tool_id,
+                        "tool_type": tool.tool_type,
+                        "view_type": view_type,
+                        "camera_count": len(camera_ids)
+                    }
+                )
+
             return {
                 "success": True,
                 "message": f"Camera view opened",
@@ -7020,10 +7866,15 @@ async def delete_tool_group(
 @app.post("/api/tool-groups/{tool_group_id}/execute")
 async def execute_tool_group(
     tool_group_id: int,
+    alarm_id: int = None,
+    event_id: int = None,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Execute a tool group macro (sequence of tool actions)"""
+    """Execute a tool group macro (sequence of tool actions)
+
+    alarm_id and event_id can be passed for audit logging when triggered from alarm detail page.
+    """
     try:
         tool_group = db.query(ToolGroup).filter(ToolGroup.id == tool_group_id).first()
         if not tool_group:
@@ -7069,7 +7920,7 @@ async def execute_tool_group(
             # Execute all actions in this step (in parallel if multiple)
             step_tasks = []
             for action in step:
-                task = execute_single_action(action, db, current_user)
+                task = execute_single_action(action, db, current_user, alarm_id, event_id)
                 step_tasks.append(task)
 
             # Wait for all actions in this step to complete
@@ -7100,18 +7951,21 @@ async def execute_tool_group(
 @app.post("/api/tool-groups/{tool_group_id}/trigger")
 async def trigger_tool_group(
     tool_group_id: int,
+    alarm_id: int = None,
+    event_id: int = None,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Trigger a tool group (alias for execute)"""
-    return await execute_tool_group(tool_group_id, current_user, db)
+    return await execute_tool_group(tool_group_id, alarm_id, event_id, current_user, db)
 
-async def execute_single_action(action: dict, db: Session, current_user: User):
+async def execute_single_action(action: dict, db: Session, current_user: User, alarm_id: int = None, event_id: int = None):
     """Execute a single action from a tool group
 
     Tools are triggered immediately without waiting for completion.
     If duration is specified, we wait that amount AFTER triggering.
     This allows rapid sequential firing of tools.
+    alarm_id and event_id are passed for audit logging when triggered from alarm detail page.
     """
     action_type = action.get("type")
     tool_id = action.get("tool_id")
@@ -7138,7 +7992,7 @@ async def execute_single_action(action: dict, db: Session, current_user: User):
 
         # Trigger the relay WITHOUT waiting for pulse completion
         # Fire and forget - we'll let the relay handle its own pulse timing
-        asyncio.create_task(trigger_tool_async(tool_id, relay_number, state, current_user, db))
+        asyncio.create_task(trigger_tool_async(tool_id, relay_number, state, current_user, db, alarm_id, event_id))
 
         # If duration is specified, wait before allowing next action
         # Duration is ONLY additional wait time, not replacement for pulse wait
@@ -7156,7 +8010,7 @@ async def execute_single_action(action: dict, db: Session, current_user: User):
     elif tool.tool_type == "camera_view" or action_type == "camera_view":
         # Camera view tools MUST return their config to the frontend
         # So we need to await the result, but still allow rapid triggering
-        result = await trigger_tool(tool_id, None, None, current_user, db)
+        result = await trigger_tool(tool_id, None, None, alarm_id, event_id, current_user, db)
 
         # If duration is specified, wait before allowing next action
         if duration:
@@ -7166,7 +8020,7 @@ async def execute_single_action(action: dict, db: Session, current_user: User):
 
     elif tool.tool_type == "webhook" or action_type == "webhook":
         # Trigger webhook asynchronously
-        asyncio.create_task(trigger_tool_async(tool_id, None, None, current_user, db))
+        asyncio.create_task(trigger_tool_async(tool_id, None, None, current_user, db, alarm_id, event_id))
 
         # Webhooks typically don't need duration wait, but support it if specified
         if duration:
@@ -7182,14 +8036,15 @@ async def execute_single_action(action: dict, db: Session, current_user: User):
     else:
         raise ValueError(f"Unsupported action type: {action_type}")
 
-async def trigger_tool_async(tool_id: int, relay_number: int, state: int, current_user: User, db: Session):
+async def trigger_tool_async(tool_id: int, relay_number: int, state: int, current_user: User, db: Session, alarm_id: int = None, event_id: int = None):
     """Async wrapper for triggering tools without blocking
 
     This allows tools to be fired rapidly in sequence without waiting for each to complete.
     Any errors are logged but don't block other tools from executing.
+    alarm_id and event_id are passed for audit logging when triggered from alarm detail page.
     """
     try:
-        await trigger_tool(tool_id, relay_number, state, current_user, db)
+        await trigger_tool(tool_id, relay_number, state, alarm_id, event_id, current_user, db)
     except Exception as e:
         logger.error(f"Async tool trigger failed for tool {tool_id}: {e}")
 

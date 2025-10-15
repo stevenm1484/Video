@@ -17,6 +17,7 @@ export default function AlarmHistoryView() {
   const [allCameras, setAllCameras] = useState([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('history') // 'history', 'live-views'
+  const [capturingCamera, setCapturingCamera] = useState(null) // Track which camera is being captured
 
   useEffect(() => {
     loadAlarmDetails()
@@ -65,6 +66,34 @@ export default function AlarmHistoryView() {
       console.error('Failed to load alarm details:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const captureLiveView = async (cameraId, cameraName) => {
+    try {
+      setCapturingCamera(cameraId)
+
+      // Call backend to capture live view
+      const response = await api.post(`/api/events/${event.id}/capture-live-view`, null, {
+        params: {
+          camera_id: cameraId,
+          duration_seconds: 10
+        }
+      })
+
+      console.log('Live view captured:', response.data)
+
+      // Reload event details to get updated live_view_captures
+      const eventsResponse = await api.get('/events')
+      const updatedEvent = eventsResponse.data.find(e => e.id === event.id)
+      setEvent(updatedEvent)
+
+      alert(`Successfully captured 10-second clip from ${cameraName}`)
+    } catch (error) {
+      console.error('Failed to capture live view:', error)
+      alert(`Failed to capture live view: ${error.response?.data?.detail || error.message}`)
+    } finally {
+      setCapturingCamera(null)
     }
   }
 
@@ -148,13 +177,47 @@ export default function AlarmHistoryView() {
               <div>
                 <div style={styles.infoBox}>
                   <p style={{fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem'}}>
-                    This shows video captures from cameras during the alarm event. Streams remain active for 30 seconds after viewing stops.
+                    Click "Capture Live View" to record a 10-second clip from any camera. Clips are saved to this event for future reference.
                   </p>
                   <p style={{fontSize: '0.75rem', color: '#64748b'}}>
-                    Note: This feature will capture and display timeline-based video clips from all active camera streams.
+                    Note: Only cameras with configured RTSP streams can be captured.
                   </p>
                 </div>
 
+                {/* Display captured clips */}
+                {event.live_view_captures && event.live_view_captures.length > 0 && (
+                  <div style={{marginBottom: '2rem'}}>
+                    <h3 style={styles.subsectionTitle}>Captured Live Views</h3>
+                    <div style={styles.capturesList}>
+                      {event.live_view_captures.map((capture, idx) => (
+                        <div key={idx} style={styles.captureItem}>
+                          <div style={styles.captureHeader}>
+                            <div style={styles.captureInfo}>
+                              <Video size={14} color="#10b981" />
+                              <span style={{fontSize: '0.875rem', fontWeight: '600', color: '#e2e8f0'}}>
+                                {capture.camera_name}
+                              </span>
+                              <span style={{fontSize: '0.75rem', color: '#94a3b8'}}>
+                                {capture.duration_seconds}s clip
+                              </span>
+                            </div>
+                            <span style={{fontSize: '0.75rem', color: '#64748b'}}>
+                              {new Date(capture.capture_timestamp).toLocaleString()}
+                            </span>
+                          </div>
+                          <video
+                            src={`/${capture.clip_path}`}
+                            controls
+                            style={styles.captureVideo}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Camera capture controls */}
+                <h3 style={styles.subsectionTitle}>Available Cameras</h3>
                 {allCameras && allCameras.length > 0 ? (
                   <div style={styles.cameraList}>
                     {allCameras.map(cam => (
@@ -167,20 +230,26 @@ export default function AlarmHistoryView() {
                               <span style={styles.alarmBadge}>ALARM CAMERA</span>
                             )}
                           </div>
-                          <span style={styles.timestamp}>
-                            {formatTimestampInTimezone(event.timestamp, account?.timezone || 'UTC', { showTime: true })}
-                          </span>
                         </div>
                         <div style={styles.cameraBody}>
                           {cam.rtsp_url ? (
                             <div style={styles.streamInfo}>
-                              <Video size={48} color="#64748b" style={{margin: '0 auto 0.5rem'}} />
-                              <p style={{fontSize: '0.875rem', color: '#94a3b8'}}>
-                                Live stream capture available
+                              <p style={{fontSize: '0.875rem', color: '#94a3b8', marginBottom: '1rem'}}>
+                                RTSP stream configured
                               </p>
-                              <p style={{fontSize: '0.75rem', color: '#64748b', marginTop: '0.25rem'}}>
-                                Stream: {cam.rtsp_url}
-                              </p>
+                              <button
+                                onClick={() => captureLiveView(cam.id, cam.name)}
+                                disabled={capturingCamera === cam.id}
+                                style={{
+                                  ...styles.captureButton,
+                                  ...(capturingCamera === cam.id ? styles.captureButtonDisabled : {})
+                                }}
+                              >
+                                <Video size={16} />
+                                <span>
+                                  {capturingCamera === cam.id ? 'Capturing...' : 'Capture Live View (10s)'}
+                                </span>
+                              </button>
                             </div>
                           ) : (
                             <div style={styles.streamInfo}>
@@ -529,5 +598,55 @@ const styles = {
     color: '#cbd5e1',
     lineHeight: '1.6',
     whiteSpace: 'pre-wrap'
+  },
+  capturesList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1rem'
+  },
+  captureItem: {
+    background: '#0f172a',
+    borderRadius: '0.375rem',
+    border: '1px solid #334155',
+    overflow: 'hidden'
+  },
+  captureHeader: {
+    padding: '0.75rem 1rem',
+    background: '#1e293b',
+    borderBottom: '1px solid #334155',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+  captureInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem'
+  },
+  captureVideo: {
+    width: '100%',
+    height: 'auto',
+    display: 'block'
+  },
+  captureButton: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '0.5rem',
+    width: '100%',
+    padding: '0.75rem 1rem',
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.375rem',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '500',
+    cursor: 'pointer',
+    transition: 'background 0.2s'
+  },
+  captureButtonDisabled: {
+    background: '#64748b',
+    cursor: 'not-allowed',
+    opacity: 0.6
   }
 }

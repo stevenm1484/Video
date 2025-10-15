@@ -271,6 +271,10 @@ class AlarmEvent(Base):
     call_retrieved_at = Column(DateTime, nullable=True)  # When call was retrieved from parking
     call_retrieved_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # Who retrieved the call
 
+    # Live view captures - recordings made when user views live stream during event
+    # Format: [{"camera_id": 1, "camera_name": "Front Door", "capture_timestamp": "...", "clip_path": "...", "duration_seconds": 10}]
+    live_view_captures = Column(JSON, nullable=True, default=list)
+
     camera = relationship("Camera", back_populates="events")
     alarm = relationship("Alarm", back_populates="event", uselist=False)
 
@@ -346,6 +350,7 @@ class AlarmAuditLog(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     details = Column(JSON, nullable=True)  # Additional context as JSON
     created_at = Column(DateTime, default=datetime.utcnow)
+    session_id = Column(String(50), nullable=True)  # Groups actions from same alarm handling session
 
 class UserActivityLog(Base):
     __tablename__ = "user_activity_log"
@@ -499,3 +504,51 @@ class Tenant(Base):
 
     # Relationships
     apartment = relationship("Apartment", back_populates="tenants")
+
+class InboundEvent(Base):
+    """
+    Log of ALL inbound events received from any source (SMTP, webhook, API, call, etc.)
+    This table captures every event BEFORE any filtering (snooze, disarm, etc.)
+    """
+    __tablename__ = "inbound_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=True, index=True)  # NULL if no camera linked
+    account_id = Column(Integer, ForeignKey("video_accounts.id"), nullable=True, index=True)  # NULL if no account linked
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)  # When event was received
+
+    # Source information
+    source_type = Column(String, index=True)  # smtp, webhook, api, call, manual
+    source_identifier = Column(String, nullable=True)  # SMTP email, phone number, API key, etc.
+
+    # Event metadata
+    media_type = Column(String, nullable=True)  # image, video, call, alert
+    media_paths = Column(JSON, nullable=True)  # List of file paths (if applicable)
+
+    # Processing outcome - what happened to this inbound event
+    # Initial outcomes: pending_created, snoozed, disarmed, no_camera_match, no_account_match, error
+    # Final outcomes: dismissed, alarm_created, on_hold, unheld, alarm_resolved
+    outcome = Column(String, index=True)
+    outcome_reason = Column(Text, nullable=True)  # Details about why event was filtered
+
+    # Final outcome tracking - what ultimately happened after pending
+    final_outcome = Column(String, nullable=True, index=True)  # dismissed, alarm_created, on_hold
+    final_outcome_at = Column(DateTime, nullable=True)  # When final outcome occurred
+    final_outcome_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # Who performed final action
+
+    # For alarm_created final outcome
+    alarm_id = Column(Integer, ForeignKey("alarms.id"), nullable=True)  # Link to alarm if created
+    alarm_resolution = Column(String, nullable=True)  # Resolution if alarm was resolved (Video Dispatched, Video False, etc.)
+    alarm_resolved_at = Column(DateTime, nullable=True)  # When alarm was resolved
+
+    # Link to created alarm event (if one was created)
+    alarm_event_id = Column(Integer, ForeignKey("alarm_events.id"), nullable=True)  # NULL if no event created
+
+    # Call metadata (for call-based events)
+    call_uniqueid = Column(String, nullable=True)
+    caller_id_num = Column(String, nullable=True)
+    caller_id_name = Column(String, nullable=True)
+
+    # Additional context
+    raw_payload = Column(JSON, nullable=True)  # Store raw request data for debugging
+    created_at = Column(DateTime, default=datetime.utcnow)

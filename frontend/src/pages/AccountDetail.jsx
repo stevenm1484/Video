@@ -11,6 +11,7 @@ import SnoozeButton from '../components/SnoozeButton'
 import VitalSignsSettings from '../components/VitalSignsSettings'
 import ToolsManager from '../components/ToolsManager'
 import ToolGroupsManager from '../components/ToolGroupsManager'
+import ActivityThresholds from '../components/ActivityThresholds'
 import { formatTimestampInTimezone } from '../utils/timezone'
 import { usePBXStore } from '../store/pbxStore'
 
@@ -434,7 +435,7 @@ export default function AccountDetail() {
       {/* Tabs */}
       <div style={styles.tabsContainer}>
         <div style={styles.tabs}>
-          {['info', 'settings', 'notes', 'contacts', ...(account?.video_type === 'Doorman' ? ['tenants'] : []), 'cameras', 'arm-disarm', 'tools', 'action-plan'].map((tab) => (
+          {['info', 'settings', 'notes', 'contacts', ...(account?.video_type === 'Doorman' ? ['tenants'] : []), 'cameras', 'arm-disarm', 'activity', 'tools', 'action-plan'].map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -450,6 +451,7 @@ export default function AccountDetail() {
               {tab === 'cameras' && `Cameras (${cameras.length})`}
               {tab === 'tenants' && `Tenants (${apartments.length})`}
               {tab === 'arm-disarm' && 'Arm/Disarm'}
+              {tab === 'activity' && 'Activity & Billing'}
               {tab === 'tools' && 'Tools'}
               {tab === 'action-plan' && 'Action Plan'}
             </button>
@@ -580,6 +582,14 @@ export default function AccountDetail() {
               }
             }}
             onRefresh={loadAccountData}
+          />
+        )}
+
+        {activeTab === 'activity' && accountId !== 'new' && (
+          <ActivityThresholds
+            entityType="account"
+            entityId={parseInt(accountId)}
+            onUpdate={loadAccountData}
           />
         )}
 

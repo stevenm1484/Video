@@ -17,7 +17,6 @@ export default function AlarmHistoryView() {
   const [allCameras, setAllCameras] = useState([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('history') // 'history', 'live-views'
-  const [capturingCamera, setCapturingCamera] = useState(null) // Track which camera is being captured
 
   useEffect(() => {
     loadAlarmDetails()
@@ -66,34 +65,6 @@ export default function AlarmHistoryView() {
       console.error('Failed to load alarm details:', error)
     } finally {
       setLoading(false)
-    }
-  }
-
-  const captureLiveView = async (cameraId, cameraName) => {
-    try {
-      setCapturingCamera(cameraId)
-
-      // Call backend to capture live view
-      const response = await api.post(`/api/events/${event.id}/capture-live-view`, null, {
-        params: {
-          camera_id: cameraId,
-          duration_seconds: 10
-        }
-      })
-
-      console.log('Live view captured:', response.data)
-
-      // Reload event details to get updated live_view_captures
-      const eventsResponse = await api.get('/events')
-      const updatedEvent = eventsResponse.data.find(e => e.id === event.id)
-      setEvent(updatedEvent)
-
-      alert(`Successfully captured 10-second clip from ${cameraName}`)
-    } catch (error) {
-      console.error('Failed to capture live view:', error)
-      alert(`Failed to capture live view: ${error.response?.data?.detail || error.message}`)
-    } finally {
-      setCapturingCamera(null)
     }
   }
 
@@ -177,17 +148,17 @@ export default function AlarmHistoryView() {
               <div>
                 <div style={styles.infoBox}>
                   <p style={{fontSize: '0.875rem', color: '#94a3b8', marginBottom: '0.5rem'}}>
-                    Click "Capture Live View" to record a 10-second clip from any camera. Clips are saved to this event for future reference.
+                    This section shows video clips that were automatically captured when you viewed live streams during alarm handling.
                   </p>
                   <p style={{fontSize: '0.75rem', color: '#64748b'}}>
-                    Note: Only cameras with configured RTSP streams can be captured.
+                    Clips are captured in the background whenever you view a live stream in the alarm detail view.
                   </p>
                 </div>
 
                 {/* Display captured clips */}
-                {event.live_view_captures && event.live_view_captures.length > 0 && (
-                  <div style={{marginBottom: '2rem'}}>
-                    <h3 style={styles.subsectionTitle}>Captured Live Views</h3>
+                {event.live_view_captures && event.live_view_captures.length > 0 ? (
+                  <div>
+                    <h3 style={styles.subsectionTitle}>Captured Live Views ({event.live_view_captures.length})</h3>
                     <div style={styles.capturesList}>
                       {event.live_view_captures.map((capture, idx) => (
                         <div key={idx} style={styles.captureItem}>
@@ -214,57 +185,15 @@ export default function AlarmHistoryView() {
                       ))}
                     </div>
                   </div>
-                )}
-
-                {/* Camera capture controls */}
-                <h3 style={styles.subsectionTitle}>Available Cameras</h3>
-                {allCameras && allCameras.length > 0 ? (
-                  <div style={styles.cameraList}>
-                    {allCameras.map(cam => (
-                      <div key={cam.id} style={styles.cameraCard}>
-                        <div style={styles.cameraHeader}>
-                          <div style={styles.cameraInfo}>
-                            <Video size={16} color="#3b82f6" />
-                            <span style={styles.cameraName}>{cam.name}</span>
-                            {cam.id === camera?.id && (
-                              <span style={styles.alarmBadge}>ALARM CAMERA</span>
-                            )}
-                          </div>
-                        </div>
-                        <div style={styles.cameraBody}>
-                          {cam.rtsp_url ? (
-                            <div style={styles.streamInfo}>
-                              <p style={{fontSize: '0.875rem', color: '#94a3b8', marginBottom: '1rem'}}>
-                                RTSP stream configured
-                              </p>
-                              <button
-                                onClick={() => captureLiveView(cam.id, cam.name)}
-                                disabled={capturingCamera === cam.id}
-                                style={{
-                                  ...styles.captureButton,
-                                  ...(capturingCamera === cam.id ? styles.captureButtonDisabled : {})
-                                }}
-                              >
-                                <Video size={16} />
-                                <span>
-                                  {capturingCamera === cam.id ? 'Capturing...' : 'Capture Live View (10s)'}
-                                </span>
-                              </button>
-                            </div>
-                          ) : (
-                            <div style={styles.streamInfo}>
-                              <p style={{fontSize: '0.875rem', color: '#64748b'}}>
-                                No RTSP stream configured
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                 ) : (
                   <div style={styles.emptyState}>
-                    No cameras available for this account
+                    <Video size={48} color="#64748b" style={{margin: '0 auto 1rem'}} />
+                    <p style={{fontSize: '1rem', color: '#94a3b8', marginBottom: '0.5rem'}}>
+                      No live views captured for this alarm
+                    </p>
+                    <p style={{fontSize: '0.875rem', color: '#64748b'}}>
+                      Live views are automatically captured when you view camera streams in the alarm detail page.
+                    </p>
                   </div>
                 )}
               </div>

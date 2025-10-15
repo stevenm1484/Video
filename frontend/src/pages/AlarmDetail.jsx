@@ -511,6 +511,21 @@ export default function AlarmDetail() {
           if (status.data.stream_url) {
             const readyTime = (attempt + 1) * 500
             console.log(`✓ Stream ready after ${readyTime}ms`)
+
+            // Auto-capture this live view in the background (don't wait for it)
+            if (alarm && alarm.event_id) {
+              console.log(`Auto-capturing live view for camera ${cameraId}, event ${alarm.event_id}`)
+              api.post(`/events/${alarm.event_id}/capture-live-view`, null, {
+                params: {
+                  camera_id: cameraId,
+                  duration_seconds: 10
+                }
+              }).catch(err => {
+                console.error('Failed to auto-capture live view:', err)
+                // Don't show error to user - this is a background operation
+              })
+            }
+
             break
           }
         }
@@ -653,6 +668,20 @@ export default function AlarmDetail() {
               if (status.data.stream_url) {
                 const readyTime = (attempt + 1) * 500
                 console.log(`✓ Camera ${cam.id} (${cam.name}) ready after ${readyTime}ms - loading now!`)
+
+                // Auto-capture this live view in the background (don't wait for it)
+                if (alarm && alarm.event_id) {
+                  console.log(`Auto-capturing grid live view for camera ${cam.id}, event ${alarm.event_id}`)
+                  api.post(`/events/${alarm.event_id}/capture-live-view`, null, {
+                    params: {
+                      camera_id: cam.id,
+                      duration_seconds: 10
+                    }
+                  }).catch(err => {
+                    console.error('Failed to auto-capture grid live view:', err)
+                    // Don't show error to user - this is a background operation
+                  })
+                }
 
                 // Load this camera immediately
                 await loadSingleGridCamera(cam)

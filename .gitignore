@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Frontend build
+frontend/dist/
+frontend/build/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Uploads and media files
+backend/uploads/
+uploads/
+media/
+/mnt/media/
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups
+*.tar.gz
+*.zip
+*.bak
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Streaming
+backend/streams/
+streams/
+*.m3u8
+*.ts
+
+# Test files
+test_images/
+temp/
+tmp/
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
+
+# SSH keys
+id_rsa*
+id_ed25519*
+*.ppk

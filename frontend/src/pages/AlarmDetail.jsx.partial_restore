@@ -1,0 +1,2776 @@
+import React, { useState, useEffect, useRef } from 'react'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { toast } from 'react-toastify'
+import ReactPlayer from 'react-player'
+import {
+  ArrowLeft, Phone, FileText, Video as VideoIcon,
+  CheckCircle, AlertTriangle, MapPin, X, Camera as CameraIcon, ArrowUpCircle, Pause
+} from 'lucide-react'
+import api from '../api/axios'
+import CallModal from '../components/CallModal'
+import SnoozeButton from '../components/SnoozeButton'
+import { formatTimestampInTimezone } from '../utils/timezone'
+
+export default function AlarmDetail() {
+  const { alarmId } = useParams()
+  const navigate = useNavigate()
+  const { state } = useLocation()
+  const fromHistory = state?.fromHistory || false
+  const [alarm, setAlarm] = useState(null)
+  const [event, setEvent] = useState(null)
+  const [camera, setCamera] = useState(null)
+  const [account, setAccount] = useState(null)
+  const [allCameras, setAllCameras] = useState([])
+  const [selectedCameraId, setSelectedCameraId] = useState(null)
+  const [notes, setNotes] = useState('')
+  const [resolution, setResolution] = useState('')
+  const [callLogs, setCallLogs] = useState([])
+  const [showCallModal, setShowCallModal] = useState(false)
+  const [selectedContact, setSelectedContact] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [selectedMediaIndex, setSelectedMediaIndex] = useState(0)
+  const [viewMode, setViewMode] = useState('single') // 'single' or 'grid'
+  const [accountEvents, setAccountEvents] = useState([])
+  const [selectedEventIndex, setSelectedEventIndex] = useState(0)
+  const [showAllEvents, setShowAllEvents] = useState(false)
+  const [showGridViewModal, setShowGridViewModal] = useState(false)
+  const [actionPlanState, setActionPlanState] = useState({})
+  const [newEventIds, setNewEventIds] = useState([]) // Track new events for blinking
+  const [newEventNotification, setNewEventNotification] = useState(null) // Popup notification for new events
+  const [showEscalateModal, setShowEscalateModal] = useState(false)
+  const [escalateNotes, setEscalateNotes] = useState('')
+  const [showHoldModal, setShowHoldModal] = useState(false)
+  const [holdNotes, setHoldNotes] = useState('')
+  const liveVideoRef = useRef(null)
+  const hlsRef = useRef(null)
+  const hlsInstancesRef = useRef({}) // For grid view - multiple HLS instances
+  const previousCameraIdRef = useRef(null)
+  const wsRef = useRef(null)
+
+  useEffect(() => {
+    loadAlarmDetails()
+  }, [alarmId])
+
+  useEffect(() => {
+    // Handle view mode changes
+    if (viewMode === 'grid' && allCameras.length > 0) {
+      // Stop single camera stream if active
+      if (previousCameraIdRef.current) {
+        api.post(`/cameras/${previousCameraIdRef.current}/stop-stream`)
+          .catch(err => console.error('Failed to stop stream:', err))
+      }
+      if (hlsRef.current) {
+        hlsRef.current.destroy()
+        hlsRef.current = null
+      }
+
+      // Load grid view after a short delay to ensure video elements are rendered
+      setTimeout(() => loadCameraGrid(), 100)
+    } else if (viewMode === 'single') {
+      // Stop all grid streams
+      stopAllGridStreams()
+
+      // Reload single camera stream after stopping grid streams
+      if (selectedCameraId && liveVideoRef.current) {
+        const selectedCam = allCameras.find(c => c.id === selectedCameraId)
+        if (selectedCam?.rtsp_url) {
+          setTimeout(() => loadLiveStream(selectedCameraId), 200)
+        }
+      }
+    }
+  }, [viewMode, allCameras])
+
+  useEffect(() => {
+    // Load HLS stream when camera changes
+    if (selectedCameraId && liveVideoRef.current) {
+      const selectedCam = allCameras.find(c => c.id === selectedCameraId)
+      if (selectedCam?.rtsp_url) {
+        // Stop previous camera's stream if switching cameras
+        if (previousCameraIdRef.current && previousCameraIdRef.current !== selectedCameraId) {
+          console.log(`Switching from camera ${previousCameraIdRef.current} to ${selectedCameraId}`)
+          api.post(`/cameras/${previousCameraIdRef.current}/stop-stream`)
+            .catch(err => console.error('Failed to stop previous stream:', err))
+        }
+
+        // Destroy existing HLS instance before loading new stream
+        if (hlsRef.current) {
+          hlsRef.current.destroy()
+          hlsRef.current = null
+        }
+
+        // Load the new camera stream
+        loadLiveStream(selectedCameraId)
+
+        // Update the previous camera ref
+        previousCameraIdRef.current = selectedCameraId
+      }
+    }
+
+    return () => {
+      // Only stop stream when component unmounts (not when camera changes)
+      // We use a flag to distinguish between camera change and unmount
+      const currentCameraId = previousCameraIdRef.current
+
+      if (hlsRef.current) {
+        hlsRef.current.destroy()
+        hlsRef.current = null
+      }
+
+      // Stop stream on component unmount
+      if (currentCameraId) {
+        console.log('Component unmounting, stopping stream for camera', currentCameraId)
+        api.post(`/cameras/${currentCameraId}/stop-stream`)
+          .catch(err => console.error('Failed to stop stream:', err))
+      }
+    }
+  }, [selectedCameraId, allCameras])
+
+  // WebSocket listener for new events
+  useEffect(() => {
+    if (!account) return
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${protocol}//${window.location.host}/ws`
+
+    console.log('🔌 Connecting to WebSocket for new events:', wsUrl)
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      console.log('✅ WebSocket connected for alarm detail')
+      // Notify backend that we're viewing this alarm
+      ws.send(JSON.stringify({
+        type: 'viewing_alarm',
+        alarm_id: parseInt(alarmId),
+        account_id: account.id
+      }))
+    }
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('📨 WebSocket message received:', data)
+
+        // Check if this is a new event for the same account
+        if (data.type === 'new_event' && data.account_id === account.id) {
+          console.log('🆕 New event for current account:', data)
+
+          // Add to accountEvents at the beginning
+          const newEvent = {
+            event_id: data.event_id,
+            camera_id: data.camera_id,
+            camera_name: data.camera_name,
+            timestamp: data.timestamp,
+            media_paths: data.media_paths || [],
+            media_type: data.media_type || 'image',
+            media_count: data.media_paths?.length || 0,
+            is_current_alarm: false
+          }
+
+          setAccountEvents(prev => [newEvent, ...prev])
+
+          // Mark as new for blinking animation
+          setNewEventIds(prev => [...prev, data.event_id])
+
+          // Remove from newEventIds after 3 blinks (3 seconds)
+          setTimeout(() => {
+            setNewEventIds(prev => prev.filter(id => id !== data.event_id))
+          }, 3000)
+
+          // Show prominent popup notification
+          setNewEventNotification({
+            event_id: data.event_id,
+            camera_name: data.camera_name,
+            timestamp: data.timestamp,
+            media_paths: data.media_paths || []
+          })
+
+          // Auto-hide notification after 10 seconds
+          setTimeout(() => {
+            setNewEventNotification(null)
+          }, 10000)
+        }
+      } catch (error) {
+        console.error('Error processing WebSocket message:', error)
+      }
+    }
+
+    ws.onerror = (error) => {
+      console.error('❌ WebSocket error:', error)
+    }
+
+    ws.onclose = () => {
+      console.log('🔌 WebSocket disconnected')
+    }
+
+    return () => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        console.log('🔌 Leaving alarm view, notifying backend')
+        wsRef.current.send(JSON.stringify({
+          type: 'left_alarm',
+          alarm_id: parseInt(alarmId),
+          account_id: account.id
+        }))
+        wsRef.current.close()
+        wsRef.current = null
+      }
+
+      // Release the account claim when component unmounts
+      if (account) {
+        api.post(`/accounts/${account.id}/release`)
+          .catch(err => console.error('Failed to release claim on unmount:', err))
+      }
+    }
+  }, [account, alarmId])
+
+  const loadAlarmDetails = async () => {
+    try {
+      // Get alarm directly by ID
+      const alarmResponse = await api.get(`/alarms/${alarmId}`)
+      const alarmData = alarmResponse.data
+
+      if (!alarmData) {
+        toast.error('Alarm not found')
+        navigate('/')
+        return
+      }
+
+      setAlarm(alarmData)
+      setNotes(alarmData.notes || '')
+      setResolution(alarmData.resolution || '')
+      setCallLogs(alarmData.call_logs || [])
+      setActionPlanState(alarmData.action_plan_state || {})
+
+      // Track that this alarm has been viewed (for audit logging)
+      api.put(`/alarms/${alarmId}/viewed`).catch(err => {
+        console.error('Failed to track alarm view:', err)
+      })
+
+      // Get event
+      const eventsResponse = await api.get('/events')
+      const eventData = eventsResponse.data.find(e => e.id === alarmData.event_id)
+      setEvent(eventData)
+
+      if (eventData) {
+        // Get all cameras
+        const camerasResponse = await api.get('/cameras')
+        const cameraData = camerasResponse.data.find(c => c.id === eventData.camera_id)
+        setCamera(cameraData)
+
+        if (cameraData) {
+          // Get account
+          const accountResponse = await api.get(`/accounts/${cameraData.account_id}`)
+          setAccount(accountResponse.data)
+
+          // Get all cameras for this account
+          const accountCameras = camerasResponse.data.filter(c => c.account_id === cameraData.account_id)
+          setAllCameras(accountCameras)
+
+          // Get all events for this account
+          const accountEventsResponse = await api.get(`/alarms/${alarmId}/account-events`)
+          setAccountEvents(accountEventsResponse.data)
+
+          // Find the index of the current alarm event
+          const currentEventIndex = accountEventsResponse.data.findIndex(e => e.is_current_alarm)
+          if (currentEventIndex !== -1) {
+            setSelectedEventIndex(currentEventIndex)
+          }
+
+          // Set selected camera ID AFTER allCameras is set (to trigger useEffect properly)
+          setSelectedCameraId(eventData.camera_id)
+        }
+      }
+    } catch (error) {
+      toast.error('Failed to load alarm details')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadLiveStream = async (cameraId) => {
+    if (!liveVideoRef.current) return
+
+    try {
+      console.log('loadLiveStream: Starting stream for camera', cameraId)
+
+      // First, check stream status
+      const statusResponse = await api.get(`/cameras/${cameraId}/stream-status`)
+      console.log('Stream status:', statusResponse.data)
+
+      // If stream is not running, start it
+      if (!statusResponse.data.is_streaming) {
+        console.log('Stream not running, starting automatically...')
+        // Use medium quality for single camera view
+        await api.post(`/cameras/${cameraId}/start-stream?quality=medium`)
+        console.log('Stream start command sent')
+      }
+
+      // Poll for stream readiness
+      if (!statusResponse.data.stream_url) {
+        console.log('Polling for stream readiness...')
+        for (let attempt = 0; attempt < 60; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 500))
+          const status = await api.get(`/cameras/${cameraId}/stream-status`)
+          if (status.data.stream_url) {
+            const readyTime = (attempt + 1) * 500
+            console.log(`✓ Stream ready after ${readyTime}ms`)
+            break
+          }
+        }
+      }
+
+      const streamUrl = `/streams/${cameraId}/playlist.m3u8`
+      console.log('loadLiveStream: Loading stream:', streamUrl)
+
+      if (window.Hls && window.Hls.isSupported()) {
+        console.log('HLS.js is supported, loading source')
+
+        // Destroy existing HLS instance
+        if (hlsRef.current) {
+          hlsRef.current.destroy()
+        }
+
+        const hls = new window.Hls({
+          debug: false,
+          enableWorker: true,
+          lowLatencyMode: true,
+          backBufferLength: 10,
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 5,
+          maxBufferLength: 10,
+          maxMaxBufferLength: 20,
+          highBufferWatchdogPeriod: 1
+        })
+
+        hls.loadSource(streamUrl)
+        hls.attachMedia(liveVideoRef.current)
+
+        // Add video element event listeners
+        const videoEl = liveVideoRef.current
+        videoEl.addEventListener('loadstart', () => console.log('Video loading started'))
+        videoEl.addEventListener('loadedmetadata', () => console.log('Video metadata loaded'))
+        videoEl.addEventListener('loadeddata', () => console.log('Video data loaded'))
+        videoEl.addEventListener('canplay', () => console.log('Video can play'))
+        videoEl.addEventListener('playing', () => console.log('Video playback started successfully'))
+        videoEl.addEventListener('error', (e) => console.error('Video element error:', e))
+
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+          console.log('HLS manifest parsed, attempting to play')
+          liveVideoRef.current.play().catch(e => console.log('Autoplay prevented:', e))
+        })
+
+        hls.on(window.Hls.Events.MEDIA_ATTACHED, () => {
+          console.log('Media attached to video element')
+        })
+
+        hls.on(window.Hls.Events.FRAG_LOADED, () => {
+          console.log('Fragment loaded successfully')
+        })
+
+        hls.on(window.Hls.Events.ERROR, (event, data) => {
+          console.log('HLS error:', data)
+          if (data.fatal) {
+            console.error('HLS fatal error:', data)
+            toast.error('Stream error: ' + data.details)
+          }
+        })
+
+        hlsRef.current = hls
+      } else if (liveVideoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS support (Safari)
+        liveVideoRef.current.src = streamUrl
+        liveVideoRef.current.play().catch(e => console.log('Autoplay prevented:', e))
+      }
+    } catch (error) {
+      console.error('Failed to load live stream:', error)
+      toast.error('Failed to load live stream')
+    }
+  }
+
+  const loadCameraGrid = async () => {
+    console.log('AlarmDetail: Loading grid streams for', allCameras.length, 'cameras')
+
+    // Load each camera stream independently - show as soon as ready
+    allCameras
+      .filter(cam => cam.rtsp_url)
+      .forEach(async (cam) => {
+        try {
+          // Start the stream
+          console.log(`Starting stream for camera ${cam.id}:`, cam.name)
+          const statusResponse = await api.get(`/cameras/${cam.id}/stream-status`)
+          if (!statusResponse.data.is_streaming) {
+            await api.post(`/cameras/${cam.id}/start-stream?quality=low`)
+            console.log(`Stream started for camera ${cam.id} (${cam.name}) in LOW quality`)
+          } else {
+            console.log(`Stream already running for camera ${cam.id} (${cam.name})`)
+          }
+
+          // Poll for playlist readiness
+          console.log(`Polling for camera ${cam.id} (${cam.name}) playlist...`)
+          for (let attempt = 0; attempt < 60; attempt++) {
+            try {
+              const status = await api.get(`/cameras/${cam.id}/stream-status`)
+              if (status.data.stream_url) {
+                const readyTime = (attempt + 1) * 500
+                console.log(`✓ Camera ${cam.id} (${cam.name}) ready after ${readyTime}ms - loading now!`)
+
+                // Load this camera immediately
+                loadSingleGridCamera(cam)
+                break
+              }
+              await new Promise(resolve => setTimeout(resolve, 500))
+            } catch (error) {
+              console.error(`Error polling camera ${cam.id}:`, error)
+              await new Promise(resolve => setTimeout(resolve, 500))
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to start stream for camera ${cam.id}:`, error)
+        }
+      })
+  }
+
+  const loadSingleGridCamera = (cam) => {
+    const videoEl = document.getElementById(`grid-video-${cam.id}`)
+
+    if (!videoEl) {
+      console.warn(`Video element for camera ${cam.id} not found`)
+      return
+    }
+
+    if (window.Hls && window.Hls.isSupported()) {
+      console.log(`Initializing HLS for camera ${cam.id} (${cam.name})`)
+      const hls = new window.Hls({
+        debug: false,
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 10,
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 5,
+        maxBufferLength: 15,
+        maxMaxBufferLength: 30,
+        highBufferWatchdogPeriod: 1
+      })
+
+      const streamUrl = `/streams/${cam.id}/playlist.m3u8`
+      console.log(`Loading HLS source for camera ${cam.id}:`, streamUrl)
+      hls.loadSource(streamUrl)
+      hls.attachMedia(videoEl)
+
+      hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        console.log(`✓ HLS manifest parsed for camera ${cam.id} (${cam.name}), playing now!`)
+        videoEl.play().catch(e => console.log(`Autoplay prevented for camera ${cam.id}:`, e))
+      })
+
+      hls.on(window.Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          console.error(`HLS fatal error for camera ${cam.id}:`, data)
+          switch (data.type) {
+            case window.Hls.ErrorTypes.NETWORK_ERROR:
+              console.log(`Network error for camera ${cam.id}, attempting recovery...`)
+              hls.startLoad()
+              break
+            case window.Hls.ErrorTypes.MEDIA_ERROR:
+              console.log(`Media error for camera ${cam.id}, attempting recovery...`)
+              hls.recoverMediaError()
+              break
+            default:
+              console.error(`Unrecoverable error for camera ${cam.id}`)
+              break
+          }
+        }
+      })
+
+      hlsInstancesRef.current[cam.id] = hls
+    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS support (Safari)
+      console.log(`Using native HLS for camera ${cam.id}`)
+      videoEl.src = `/streams/${cam.id}/playlist.m3u8`
+      videoEl.play().catch(e => console.log('Autoplay prevented:', e))
+    }
+  }
+
+  const stopAllGridStreams = () => {
+    // Clean up all HLS instances
+    Object.values(hlsInstancesRef.current).forEach(hls => {
+      if (hls) hls.destroy()
+    })
+    hlsInstancesRef.current = {}
+
+    // Stop all streams
+    allCameras.forEach(cam => {
+      api.post(`/cameras/${cam.id}/stop-stream`)
+        .catch(err => console.error(`Failed to stop stream for camera ${cam.id}:`, err))
+    })
+  }
+
+  const handleResolve = async () => {
+    if (!resolution) {
+      toast.error('Please select a resolution before resolving')
+      return
+    }
+
+    // Validate action plan completion
+    if (!isActionPlanComplete()) {
+      toast.error('Please complete all required action plan steps before resolving the alarm')
+      return
+    }
+
+    try {
+      await api.put(`/alarms/${alarmId}/resolve`, {
+        notes,
+        resolution,
+        call_logs: callLogs,
+        action_plan_state: actionPlanState
+      })
+
+      // Restore receiving state if it was saved before navigating to alarm
+      try {
+        await api.post('/users/me/restore-receiving')
+      } catch (error) {
+        console.error('Failed to restore receiving state:', error)
+      }
+
+      navigate(fromHistory ? '/history' : '/')
+    } catch (error) {
+      toast.error('Failed to resolve alarm')
+    }
+  }
+
+  const handleEscalate = () => {
+    setShowEscalateModal(true)
+  }
+
+  const handleConfirmEscalate = async () => {
+    try {
+      // Get the event_id from the alarm
+      if (alarm?.event_id) {
+        // Pass escalation notes (NOT the current notes textarea value)
+        await api.put(`/events/${alarm.event_id}/escalate`, {
+          notes: escalateNotes.trim() || undefined
+        })
+        setShowEscalateModal(false)
+        setEscalateNotes('')
+
+        // Restore receiving state if it was saved before navigating to alarm
+        try {
+          await api.post('/users/me/restore-receiving')
+        } catch (error) {
+          console.error('Failed to restore receiving state:', error)
+        }
+
+        navigate(fromHistory ? '/history' : '/')
+      } else {
+        toast.error('Unable to escalate: No event associated with this alarm')
+      }
+    } catch (error) {
+      if (error.response?.status === 400 && error.response?.data?.detail) {
+        toast.error(error.response.data.detail)
+      } else {
+        toast.error('Failed to escalate alarm')
+      }
+    }
+  }
+
+  const handleCancelEscalate = () => {
+    setShowEscalateModal(false)
+    setEscalateNotes('')
+  }
+
+  const handleHold = () => {
+    setShowHoldModal(true)
+  }
+
+  const handleConfirmHold = async () => {
+    try {
+      await api.put(`/alarms/${alarmId}/hold`, {
+        notes: holdNotes.trim() || undefined
+      })
+      setShowHoldModal(false)
+      setHoldNotes('')
+
+      // Restore receiving state if it was saved before navigating to alarm
+      try {
+        await api.post('/users/me/restore-receiving')
+      } catch (error) {
+        console.error('Failed to restore receiving state:', error)
+      }
+
+      navigate(fromHistory ? '/history' : '/')
+    } catch (error) {
+      if (error.response?.status === 400 && error.response?.data?.detail) {
+        toast.error(error.response.data.detail)
+      } else {
+        toast.error('Failed to place alarm on hold')
+      }
+    }
+  }
+
+  const handleCancelHold = () => {
+    setShowHoldModal(false)
+    setHoldNotes('')
+  }
+
+  const handleCallContact = (contact) => {
+    setSelectedContact(contact)
+    setShowCallModal(true)
+  }
+
+  const handleSaveCallLog = async (callLog) => {
+    const updatedCallLogs = [...callLogs, callLog]
+    setCallLogs(updatedCallLogs)
+
+    try {
+      await api.put(`/alarms/${alarmId}`, {
+        notes,
+        resolution,
+        call_logs: updatedCallLogs
+      })
+    } catch (error) {
+      toast.error('Failed to save call log')
+    }
+  }
+
+  const handleDismissNewEvent = async () => {
+    if (!newEventNotification) return
+
+    try {
+      // Dismiss the new event with "Duplicate" resolution
+      await api.put(`/events/${newEventNotification.event_id}/dismiss?resolution=Duplicate`)
+
+      // Remove from accountEvents list
+      setAccountEvents(prev => prev.filter(e => e.id !== newEventNotification.event_id))
+
+      // Clear the notification
+      setNewEventNotification(null)
+
+    } catch (error) {
+      console.error('Failed to dismiss event:', error)
+      toast.error('Failed to dismiss event')
+    }
+  }
+
+  const handleBackToDashboard = async () => {
+    try {
+      // Only revert if alarm is still active and coming from dashboard (not history)
+      if (alarm.status === 'active' && !fromHistory) {
+        await api.put(`/alarms/${alarmId}/revert-to-pending`)
+      }
+
+      // Release the account claim when leaving
+      if (account) {
+        await api.post(`/accounts/${account.id}/release`)
+          .catch(err => console.error('Failed to release claim:', err))
+      }
+
+      navigate(fromHistory ? '/history' : '/')
+    } catch (error) {
+      console.error('Failed to revert alarm:', error)
+      // Navigate anyway even if revert fails
+      navigate(fromHistory ? '/history' : '/')
+    }
+  }
+
+  const handleToggleActionPlanStep = async (stepId) => {
+    if (fromHistory) return // Disable toggling when viewing history
+
+    const newState = {
+      ...actionPlanState,
+      [stepId]: !actionPlanState[stepId]
+    }
+    setActionPlanState(newState)
+
+    try {
+      await api.put(`/alarms/${alarmId}`, {
+        notes,
+        resolution,
+        call_logs: callLogs,
+        action_plan_state: newState
+      })
+    } catch (error) {
+      console.error('Failed to update action plan state:', error)
+      toast.error('Failed to update action plan')
+    }
+  }
+
+  const handleWebhookTrigger = async (step) => {
+    if (fromHistory) return // Disable webhook triggering when viewing history
+
+    try {
+      const response = await fetch(step.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          alarm_id: alarmId,
+          account_name: account?.name,
+          account_number: account?.account_number,
+          timestamp: new Date().toISOString(),
+          step_label: step.label
+        })
+      })
+
+      if (response.ok) {
+        // Mark step as complete
+        await handleToggleActionPlanStep(step.id)
+      } else {
+        toast.error(`Failed to trigger ${step.label}`)
+      }
+    } catch (error) {
+      console.error('Webhook trigger error:', error)
+      toast.error(`Error triggering ${step.label}`)
+    }
+  }
+
+  const isActionPlanComplete = () => {
+    if (!account?.action_plan || account.action_plan.length === 0) return true
+
+    const checkStep = (step) => {
+      if (step.isBoolean) {
+        // Boolean step must be answered ('yes' or 'no')
+        const answer = actionPlanState[step.id]
+        if (answer !== 'yes' && answer !== 'no') {
+          return false
+        }
+
+        // Check the active branch steps recursively
+        const branchSteps = answer === 'yes' ? step.yesSteps : step.noSteps
+        if (branchSteps && branchSteps.length > 0) {
+          for (const branchStep of branchSteps) {
+            if (!checkStep(branchStep)) {
+              return false
+            }
+          }
+        }
+      } else {
+        // Regular step must be completed (true)
+        if (actionPlanState[step.id] !== true) {
+          return false
+        }
+      }
+      return true
+    }
+
+    // Check each top-level step
+    for (const step of account.action_plan) {
+      if (!checkStep(step)) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  if (loading) {
+    return (
+      <div style={styles.loadingContainer}>
+        <div style={styles.spinner}></div>
+        <p>Loading alarm details...</p>
+      </div>
+    )
+  }
+
+  if (!alarm || !event) {
+    return <div style={styles.error}>Alarm not found</div>
+  }
+
+  return (
+    <div style={styles.container}>
+      {/* New Event Notification Popup */}
+      {newEventNotification && (
+        <div style={styles.newEventNotification} className="blink-red">
+          <div style={styles.notificationHeader}>
+            <AlertTriangle size={24} color="#ef4444" />
+            <span style={styles.notificationTitle}>🚨 NEW EVENT RECEIVED</span>
+            <button
+              style={styles.notificationCloseBtn}
+              onClick={handleDismissNewEvent}
+              title="Dismiss as Duplicate"
+            >
+              <X size={20} />
+            </button>
+          </div>
+          <div style={styles.notificationContent}>
+            <div style={styles.notificationInfo}>
+              <div style={styles.notificationCamera}>
+                Camera: <strong>{newEventNotification.camera_name}</strong>
+              </div>
+              <div style={styles.notificationTime}>
+                {formatTimestampInTimezone(newEventNotification.timestamp, account?.timezone, { showDate: true, showTime: true })}
+              </div>
+            </div>
+            {newEventNotification.media_paths && newEventNotification.media_paths.length > 0 && (
+              <img
+                src={`/${newEventNotification.media_paths[0]}`}
+                alt="New event preview"
+                style={styles.notificationThumbnail}
+                onError={(e) => { e.target.style.display = 'none' }}
+              />
+            )}
+          </div>
+          <div style={styles.notificationFooter}>
+            <span style={styles.notificationHint}>Event added to timeline on the right →</span>
+          </div>
+        </div>
+      )}
+
+      {/* Header with status and back button */}
+      <div style={styles.header}>
+        <div style={styles.statusBadge}>
+          {alarm.status === 'active' ? (
+            <>
+              <AlertTriangle size={18} />
+              <span>Active - {formatTimestampInTimezone(alarm.created_at, account?.timezone, { showTimezone: true })}</span>
+            </>
+          ) : (
+            <>
+              <CheckCircle size={18} />
+              <span>Resolved - {formatTimestampInTimezone(alarm.created_at, account?.timezone, { showTimezone: true })}</span>
+            </>
+          )}
+        </div>
+        <div style={styles.headerActions}>
+          {alarm.status === 'active' && (
+            <>
+              <button style={styles.holdBtn} onClick={handleHold}>
+                <Pause size={20} />
+                <span>Hold</span>
+              </button>
+              <button style={styles.escalateBtnHeader} onClick={handleEscalate}>
+                <ArrowUpCircle size={20} />
+                <span>Escalate</span>
+              </button>
+            </>
+          )}
+          <button style={styles.backBtn} onClick={handleBackToDashboard}>
+            <ArrowLeft size={20} />
+            <span>{fromHistory ? 'Back to History' : 'Back to Dashboard'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Account and Camera Information Row */}
+      <div style={styles.infoRow}>
+        {/* Account Information - Left */}
+        {account && (
+          <div style={styles.accountSection}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem'}}>
+              <h2 style={styles.sectionTitle}>Account Information</h2>
+              <SnoozeButton
+                type="account"
+                id={account.id}
+                snoozedUntil={account.snoozed_until}
+                onSnoozeUpdate={loadAlarmDetails}
+                showLabel={false}
+              />
+            </div>
+            <div style={styles.accountInfoCompact}>
+              <div style={styles.compactRow}>
+                <div style={styles.compactField}>
+                  <span style={styles.compactLabel}>Account:</span>
+                  <span style={styles.compactValue}>{account.name}</span>
+                </div>
+                <div style={styles.compactField}>
+                  <span style={styles.compactLabel}>Number:</span>
+                  <span style={styles.compactValue}>{account.account_number}</span>
+                </div>
+              </div>
+              {(account.address || account.city || account.state || account.zip_code) && (
+                <div style={styles.compactRow}>
+                  <div style={styles.compactFieldFull}>
+                    <MapPin size={14} style={{flexShrink: 0}} />
+                    <div style={styles.addressInline}>
+                      {account.address && <span>{account.address}</span>}
+                      {(account.city || account.state || account.zip_code) && (
+                        <span>
+                          {account.address ? ' • ' : ''}
+                          {account.city}{account.city && (account.state || account.zip_code) ? ', ' : ''}
+                          {account.state} {account.zip_code}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {account.notes && (
+                <div style={styles.compactRow}>
+                  <div style={styles.compactFieldFull}>
+                    <FileText size={14} style={{flexShrink: 0}} />
+                    <span style={styles.compactValue}>{account.notes}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Camera Information - Right */}
+        {camera && (
+          <div style={styles.cameraSection}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem'}}>
+              <h2 style={styles.sectionTitle}>Camera Information</h2>
+              <SnoozeButton
+                type="camera"
+                id={camera.id}
+                snoozedUntil={camera.snoozed_until}
+                onSnoozeUpdate={loadAlarmDetails}
+                showLabel={false}
+              />
+            </div>
+            <div style={styles.infoCard}>
+              <div style={styles.compactRow}>
+                <div style={styles.compactField}>
+                  <span style={styles.compactLabel}>Camera:</span>
+                  <span style={styles.compactValue}>{camera.name}</span>
+                </div>
+              </div>
+              {camera.location && (
+                <div style={styles.compactRow}>
+                  <div style={styles.compactFieldFull}>
+                    <MapPin size={14} style={{flexShrink: 0}} />
+                    <span style={styles.compactValue}>{camera.location}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+
+      {/* 3-Column Video Grid: Event Media | Events Timeline | Live Feed */}
+      <div style={styles.videoGrid}>
+        {/* Left Column: Event Media */}
+        <div style={styles.videoSection}>
+          <div style={styles.videoHeader}>
+            <h2 style={styles.videoTitle}>Event Media</h2>
+            <span style={styles.timestamp}>
+              {formatTimestampInTimezone(event.timestamp, account?.timezone, { showTimezone: true })}
+            </span>
+          </div>
+          <div style={styles.videoContainer}>
+            {event.media_paths && event.media_paths.length > 0 ? (
+              <>
+                {event.media_type === 'video' || event.media_paths[selectedMediaIndex]?.endsWith('.mp4') ? (
+                  <video
+                    key={event.media_paths[selectedMediaIndex]}
+                    src={`/${event.media_paths[selectedMediaIndex]}`}
+                    style={styles.video}
+                    controls
+                    autoPlay
+                  />
+                ) : (
+                  <img
+                    src={`/${event.media_paths[selectedMediaIndex]}`}
+                    alt="Event capture"
+                    style={styles.video}
+                  />
+                )}
+                {event.media_paths.length > 1 && (
+                  <div style={styles.mediaThumbs}>
+                    {event.media_paths.map((path, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          ...styles.thumb,
+                          ...(selectedMediaIndex === idx ? styles.thumbActive : {})
+                        }}
+                        onClick={() => setSelectedMediaIndex(idx)}
+                      >
+                        <img src={`/${path}`} alt={`Media ${idx + 1}`} style={styles.thumbImage} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={styles.noMedia}>No media available</div>
+            )}
+          </div>
+        </div>
+
+        {/* Middle Column: Events Timeline */}
+        {accountEvents.length > 1 && (
+          <div style={styles.eventsTimelineVertical}>
+            <div style={styles.timelineHeaderVertical}>
+              <h2 style={styles.videoTitle}>Events ({accountEvents.length})</h2>
+            </div>
+            <div style={styles.timelineScrollVertical}>
+              {accountEvents
+                .slice()
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                .map((evt, displayIdx) => {
+                  const actualIdx = accountEvents.findIndex(e => e.event_id === evt.event_id)
+
+                  return (
+                    <div
+                      key={evt.event_id}
+                      className={newEventIds.includes(evt.event_id) ? 'blink-red' : ''}
+                      style={{
+                        ...styles.timelineEventVertical,
+                        ...(selectedEventIndex === actualIdx ? styles.timelineEventVerticalActive : {}),
+                        ...(evt.is_current_alarm ? styles.timelineEventCurrent : {})
+                      }}
+                      onClick={async () => {
+                        setSelectedEventIndex(actualIdx)
+                        setEvent({
+                          ...event,
+                          media_paths: evt.media_paths,
+                          media_type: evt.media_type,
+                          timestamp: evt.timestamp,
+                          camera_id: evt.camera_id
+                        })
+                        setSelectedMediaIndex(0)
+
+                        if (evt.camera_id) {
+                          setSelectedCameraId(evt.camera_id)
+                        }
+                      }}
+                    >
+                      <div style={styles.timelineEventContentVertical}>
+                        {evt.media_paths && evt.media_paths.length > 0 && (
+                          <img
+                            src={`/${evt.media_paths[0]}`}
+                            alt="Preview"
+                            style={styles.timelineEventThumbVertical}
+                            onError={(e) => {
+                              e.target.style.display = 'none'
+                            }}
+                          />
+                        )}
+                        <div style={styles.timelineEventInfo}>
+                          <div style={styles.timelineEventCamera}>{evt.camera_name}</div>
+                          <div style={styles.timelineEventTime}>
+                            {formatTimestampInTimezone(evt.timestamp, account?.timezone, { showDate: true, showTime: true })}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+            </div>
+          </div>
+        )}
+
+        {/* Right Column: Live Feed */}
+        <div style={styles.videoSection}>
+          <div style={styles.videoHeader}>
+            <h2 style={styles.videoTitle}>
+              {fromHistory ? (
+                <>
+                  <FileText size={20} />
+                  Notes & Call Logs
+                </>
+              ) : (
+                <>
+                  <VideoIcon size={20} />
+                  Live Camera Feed
+                </>
+              )}
+            </h2>
+            {!fromHistory && (
+              <div style={{display: 'flex', gap: '0.5rem', alignItems: 'center'}}>
+                {allCameras.length > 1 && viewMode === 'single' && (
+                  <select
+                    style={styles.cameraSelect}
+                    value={selectedCameraId || ''}
+                    onChange={(e) => setSelectedCameraId(parseInt(e.target.value))}
+                  >
+                    {allCameras.map(cam => (
+                      <option key={cam.id} value={cam.id}>
+                        {cam.name} {cam.id === camera?.id ? '(Alarm Camera)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {allCameras.length > 1 && (
+                  <button
+                    style={styles.viewModeBtn}
+                    onClick={() => setViewMode(viewMode === 'single' ? 'grid' : 'single')}
+                  >
+                    {viewMode === 'single' ? 'Grid View' : 'Single View'}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          <div style={styles.videoContainer}>
+            {fromHistory ? (
+              // Show Notes and Call Logs when viewing from history
+              <div style={styles.historyNotesContainer}>
+                <div style={styles.historySection}>
+                  <h3 style={styles.historySubtitle}>Alarm Notes</h3>
+                  <div style={styles.historyNotes}>
+                    {notes || <em style={{color: '#64748b'}}>No notes recorded</em>}
+                  </div>
+                </div>
+                {callLogs && callLogs.length > 0 && (
+                  <div style={styles.historySection}>
+                    <h3 style={styles.historySubtitle}>Call Logs</h3>
+                    <div style={styles.callLogsList}>
+                      {callLogs.map((log, idx) => (
+                        <div key={idx} style={styles.callLogCard}>
+                          <div style={styles.callLogHeader}>
+                            <div>
+                              <div style={styles.callLogContact}>{log.contact_name}</div>
+                              <div style={styles.callLogPhone}>{log.contact_phone}</div>
+                            </div>
+                            <div style={{
+                              ...styles.callLogResolution,
+                              ...(log.resolution === 'Contacted' ? {background: '#065f46', color: '#10b981'} : {})
+                            }}>
+                              {log.resolution}
+                            </div>
+                          </div>
+                          {log.notes && (
+                            <div style={styles.callLogNotes}>{log.notes}</div>
+                          )}
+                          <div style={styles.callLogTime}>
+                            {formatTimestampInTimezone(log.timestamp, account?.timezone, { showTimezone: true })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : viewMode === 'single' ? (
+              // Single camera view
+              selectedCameraId && allCameras.find(c => c.id === selectedCameraId)?.rtsp_url ? (
+                <video
+                  ref={liveVideoRef}
+                  style={styles.video}
+                  controls
+                  muted
+                  playsInline
+                />
+              ) : (
+                <div style={styles.noMedia}>
+                  <VideoIcon size={48} />
+                  <p>No live feed available</p>
+                </div>
+              )
+            ) : (
+              // Grid view
+              <div style={styles.cameraGrid}>
+                {allCameras.map(cam => (
+                  <div key={cam.id} style={styles.gridItem}>
+                    <div style={styles.gridItemHeader}>
+                      <span>{cam.name}</span>
+                      {cam.id === camera?.id && <span style={styles.alarmBadge}>Alarm</span>}
+                    </div>
+                    {cam.rtsp_url ? (
+                      <video
+                        id={`grid-video-${cam.id}`}
+                        style={styles.gridVideo}
+                        controls
+                        muted
+                        playsInline
+                      />
+                    ) : (
+                      <div style={styles.gridNoFeed}>
+                        <VideoIcon size={32} />
+                        <span>No RTSP</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* PLACEHOLDER: Two-column layout will go here - Action Plan | Notes/Contacts/Actions */}
+
+      {/* Call Modal */}
+      {showCallModal && selectedContact && (
+        <CallModal
+          contact={selectedContact}
+          onClose={() => setShowCallModal(false)}
+          onSave={handleSaveCallLog}
+        />
+      )}
+
+      {/* Grid View Modal */}
+      {showGridViewModal && allCameras.length > 0 && (
+        <CameraGridModalForAlarm
+          cameras={allCameras}
+          onClose={() => setShowGridViewModal(false)}
+        />
+      )}
+
+      {/* Escalate Modal */}
+      {showEscalateModal && (
+        <div style={styles.modalOverlay} onClick={handleCancelEscalate}>
+          <div style={styles.escalateModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.escalateModalHeader}>
+              <h3 style={styles.escalateModalTitle}>Escalate Alarm</h3>
+              <button style={styles.escalateModalCloseBtn} onClick={handleCancelEscalate}>
+                <X size={20} />
+              </button>
+            </div>
+            <div style={styles.escalateModalBody}>
+              <label style={styles.escalateModalLabel}>Add escalation notes:</label>
+              <textarea
+                style={styles.escalateModalTextarea}
+                placeholder="Describe why this alarm needs escalation..."
+                value={escalateNotes}
+                onChange={(e) => setEscalateNotes(e.target.value)}
+                rows={5}
+                autoFocus
+              />
+            </div>
+            <div style={styles.escalateModalFooter}>
+              <button style={styles.escalateModalCancelBtn} onClick={handleCancelEscalate}>
+                Cancel
+              </button>
+              <button style={styles.escalateModalConfirmBtn} onClick={handleConfirmEscalate}>
+                <ArrowUpCircle size={18} />
+                <span>Escalate</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hold Modal */}
+      {showHoldModal && (
+        <div style={styles.modalOverlay} onClick={handleCancelHold}>
+          <div style={styles.escalateModal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.escalateModalHeader}>
+              <h3 style={styles.escalateModalTitle}>Hold Alarm</h3>
+              <button style={styles.escalateModalCloseBtn} onClick={handleCancelHold}>
+                <X size={20} />
+              </button>
+            </div>
+            <div style={styles.escalateModalBody}>
+              <label style={styles.escalateModalLabel}>Add hold notes:</label>
+              <textarea
+                style={styles.escalateModalTextarea}
+                placeholder="Describe why this alarm needs to be held..."
+                value={holdNotes}
+                onChange={(e) => setHoldNotes(e.target.value)}
+                rows={5}
+                autoFocus
+              />
+            </div>
+            <div style={styles.escalateModalFooter}>
+              <button style={styles.escalateModalCancelBtn} onClick={handleCancelHold}>
+                Cancel
+              </button>
+              <button style={styles.holdModalConfirmBtn} onClick={handleConfirmHold}>
+                <Pause size={18} />
+                <span>Hold</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CameraGridModalForAlarm({ cameras, onClose }) {
+  const hlsInstancesRef = useRef({})
+  const camerasRef = useRef(cameras)
+  const isMountedRef = useRef(true)
+
+  useEffect(() => {
+    camerasRef.current = cameras
+  }, [cameras])
+
+  useEffect(() => {
+    const loadStreams = async () => {
+      console.log('CameraGridModalForAlarm: Loading streams for', cameras.length, 'cameras')
+
+      cameras
+        .filter(cam => cam.rtsp_url)
+        .forEach(async (cam) => {
+          try {
+            console.log(`Starting stream for camera ${cam.id}:`, cam.name)
+            const statusResponse = await api.get(`/cameras/${cam.id}/stream-status`)
+            if (!statusResponse.data.is_streaming) {
+              await api.post(`/cameras/${cam.id}/start-stream?quality=low`)
+              console.log(`Stream started for camera ${cam.id} (${cam.name}) in LOW quality`)
+            } else {
+              console.log(`Stream already running for camera ${cam.id} (${cam.name})`)
+            }
+
+            console.log(`Polling for camera ${cam.id} (${cam.name}) playlist...`)
+            for (let attempt = 0; attempt < 60; attempt++) {
+              try {
+                const status = await api.get(`/cameras/${cam.id}/stream-status`)
+                if (status.data.stream_url) {
+                  const readyTime = (attempt + 1) * 500
+                  console.log(`✓ Camera ${cam.id} (${cam.name}) ready after ${readyTime}ms - loading now!`)
+                  loadSingleCamera(cam)
+                  break
+                }
+                await new Promise(resolve => setTimeout(resolve, 500))
+              } catch (error) {
+                console.error(`Error polling camera ${cam.id}:`, error)
+                await new Promise(resolve => setTimeout(resolve, 500))
+              }
+            }
+          } catch (error) {
+            console.error(`Failed to start stream for camera ${cam.id}:`, error)
+          }
+        })
+    }
+
+    const loadSingleCamera = (cam) => {
+      const videoEl = document.getElementById(`alarm-grid-video-${cam.id}`)
+
+      if (!videoEl) {
+        console.warn(`Video element for camera ${cam.id} not found`)
+        return
+      }
+
+      if (window.Hls && window.Hls.isSupported()) {
+        console.log(`Initializing HLS for camera ${cam.id} (${cam.name})`)
+        const hls = new window.Hls({
+          debug: false,
+          enableWorker: true,
+          lowLatencyMode: true,
+          backBufferLength: 10,
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 5,
+          maxBufferLength: 15,
+          maxMaxBufferLength: 30,
+          highBufferWatchdogPeriod: 1
+        })
+
+        const streamUrl = `/streams/${cam.id}/playlist.m3u8`
+        console.log(`Loading HLS source for camera ${cam.id}:`, streamUrl)
+        hls.loadSource(streamUrl)
+        hls.attachMedia(videoEl)
+
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+          console.log(`✓ HLS manifest parsed for camera ${cam.id} (${cam.name}), playing now!`)
+          videoEl.play().catch(e => console.log(`Autoplay prevented for camera ${cam.id}:`, e))
+        })
+
+        hls.on(window.Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            console.error(`HLS fatal error for camera ${cam.id}:`, data)
+            switch (data.type) {
+              case window.Hls.ErrorTypes.NETWORK_ERROR:
+                console.log(`Network error for camera ${cam.id}, attempting recovery...`)
+                hls.startLoad()
+                break
+              case window.Hls.ErrorTypes.MEDIA_ERROR:
+                console.log(`Media error for camera ${cam.id}, attempting recovery...`)
+                hls.recoverMediaError()
+                break
+              default:
+                console.error(`Unrecoverable error for camera ${cam.id}`)
+                break
+            }
+          }
+        })
+
+        hlsInstancesRef.current[cam.id] = hls
+      } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        console.log(`Using native HLS for camera ${cam.id}`)
+        videoEl.src = `/streams/${cam.id}/playlist.m3u8`
+        videoEl.play().catch(e => console.log('Autoplay prevented:', e))
+      }
+    }
+
+    loadStreams()
+
+    return () => {
+      console.log('CameraGridModalForAlarm: Cleanup called')
+      isMountedRef.current = false
+
+      Object.values(hlsInstancesRef.current).forEach(hls => {
+        if (hls) hls.destroy()
+      })
+      hlsInstancesRef.current = {}
+
+      console.log('CameraGridModalForAlarm: Stopping', camerasRef.current.length, 'streams')
+      camerasRef.current.forEach(cam => {
+        console.log(`Stopping stream for camera ${cam.id}`)
+        api.post(`/cameras/${cam.id}/stop-stream`)
+          .catch(err => console.error(`Failed to stop stream for camera ${cam.id}:`, err))
+      })
+    }
+  }, [])
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.gridModal} onClick={e => e.stopPropagation()}>
+        <div style={styles.gridModalHeader}>
+          <h2 style={styles.modalTitle}>
+            All Cameras Grid View
+          </h2>
+          <button style={styles.closeBtn} onClick={onClose}>
+            <X size={24} />
+          </button>
+        </div>
+
+        <div style={styles.gridModalContent}>
+          <div style={styles.cameraGrid}>
+            {cameras.map(cam => (
+              <div key={cam.id} style={styles.gridItem}>
+                <div style={styles.gridItemHeader}>
+                  <span style={styles.gridCameraName}>{cam.name}</span>
+                  {cam.location && (
+                    <span style={styles.gridCameraLocation}>{cam.location}</span>
+                  )}
+                </div>
+                {cam.rtsp_url ? (
+                  <video
+                    id={`alarm-grid-video-${cam.id}`}
+                    style={styles.gridVideo}
+                    controls
+                    muted
+                    playsInline
+                  />
+                ) : (
+                  <div style={styles.gridNoFeed}>
+                    <CameraIcon size={32} />
+                    <span>No RTSP configured</span>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={styles.gridModalFooter}>
+          <button style={styles.cancelBtn} onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const styles = {
+  container: {
+    width: '100%',
+    maxWidth: '1800px',
+    margin: '0 auto',
+    position: 'relative'
+  },
+  newEventNotification: {
+    position: 'fixed',
+    top: '20px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    width: '600px',
+    maxWidth: '90vw',
+    background: 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)',
+    border: '3px solid #ef4444',
+    borderRadius: '12px',
+    padding: '1.5rem',
+    boxShadow: '0 10px 40px rgba(239, 68, 68, 0.5), 0 0 0 1px rgba(239, 68, 68, 0.3)',
+    zIndex: 9999,
+    animation: 'slideDown 0.3s ease-out'
+  },
+  notificationHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    marginBottom: '1rem',
+    position: 'relative'
+  },
+  notificationTitle: {
+    fontSize: '1.25rem',
+    fontWeight: '700',
+    color: '#fff',
+    flex: 1,
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em'
+  },
+  notificationCloseBtn: {
+    position: 'absolute',
+    top: '-0.5rem',
+    right: '-0.5rem',
+    background: '#450a0a',
+    border: '2px solid #ef4444',
+    borderRadius: '50%',
+    width: '32px',
+    height: '32px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    color: '#fff',
+    transition: 'all 0.2s',
+    padding: 0
+  },
+  notificationContent: {
+    display: 'flex',
+    gap: '1rem',
+    alignItems: 'center',
+    marginBottom: '1rem'
+  },
+  notificationInfo: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem'
+  },
+  notificationCamera: {
+    fontSize: '1rem',
+    color: '#fecaca'
+  },
+  notificationTime: {
+    fontSize: '0.875rem',
+    color: '#fca5a5'
+  },
+  notificationThumbnail: {
+    width: '120px',
+    height: '80px',
+    objectFit: 'cover',
+    borderRadius: '8px',
+    border: '2px solid #ef4444',
+    boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)'
+  },
+  notificationFooter: {
+    paddingTop: '0.75rem',
+    borderTop: '1px solid rgba(239, 68, 68, 0.3)',
+    textAlign: 'center'
+  },
+  notificationHint: {
+    fontSize: '0.875rem',
+    color: '#fca5a5',
+    fontStyle: 'italic'
+  },
+  loadingContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: '400px',
+    gap: '1rem',
+    color: '#94a3b8'
+  },
+  spinner: {
+    width: '48px',
+    height: '48px',
+    border: '4px solid #334155',
+    borderTop: '4px solid #3b82f6',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite'
+  },
+  videoGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 150px 1fr',
+    gap: '1.5rem',
+    marginBottom: '2rem'
+  },
+  videoSection: {
+    background: '#1e293b',
+    borderRadius: '0.75rem',
+    border: '1px solid #334155',
+    overflow: 'hidden'
+  },
+  videoHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '1rem 1.5rem',
+    borderBottom: '1px solid #334155',
+    background: '#0f172a'
+  },
+  videoTitle: {
+    fontSize: '1.125rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    margin: 0
+  },
+  timestamp: {
+    fontSize: '0.875rem',
+    color: '#94a3b8'
+  },
+  cameraSelect: {
+    background: '#334155',
+    border: '1px solid #475569',
+    borderRadius: '0.375rem',
+    padding: '0.5rem 0.75rem',
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    fontWeight: '500',
+    cursor: 'pointer',
+    outline: 'none'
+  },
+  viewModeBtn: {
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.375rem',
+    padding: '0.5rem 0.75rem',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '500',
+    cursor: 'pointer',
+    outline: 'none'
+  },
+  cameraGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+    gap: '1rem',
+    padding: '1rem'
+  },
+  gridItem: {
+    background: '#1e293b',
+    borderRadius: '0.5rem',
+    overflow: 'hidden',
+    border: '1px solid #334155'
+  },
+  gridItemHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '0.75rem',
+    background: '#0f172a',
+    borderBottom: '1px solid #334155',
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    fontWeight: '500'
+  },
+  alarmBadge: {
+    background: '#ef4444',
+    padding: '0.25rem 0.5rem',
+    borderRadius: '0.25rem',
+    fontSize: '0.75rem',
+    fontWeight: '600',
+    color: '#fff'
+  },
+  gridVideo: {
+    width: '100%',
+    height: 'auto',
+    minHeight: '200px',
+    maxHeight: '300px',
+    objectFit: 'contain',
+    display: 'block',
+    background: '#000'
+  },
+  gridNoFeed: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '2rem',
+    gap: '0.5rem',
+    color: '#64748b',
+    minHeight: '200px'
+  },
+  videoContainer: {
+    position: 'relative',
+    background: '#0f172a',
+    minHeight: '300px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  video: {
+    width: '100%',
+    height: 'auto',
+    maxHeight: '400px',
+    objectFit: 'contain',
+    display: 'block'
+  },
+  mediaThumbs: {
+    display: 'flex',
+    gap: '0.5rem',
+    padding: '0.75rem',
+    background: 'rgba(15, 23, 42, 0.95)',
+    borderTop: '1px solid #334155',
+    overflowX: 'auto'
+  },
+  thumb: {
+    width: '80px',
+    height: '60px',
+    borderRadius: '0.375rem',
+    overflow: 'hidden',
+    cursor: 'pointer',
+    border: '2px solid transparent',
+    transition: 'border-color 0.2s',
+    flexShrink: 0
+  },
+  thumbActive: {
+    borderColor: '#3b82f6'
+  },
+  thumbImage: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover'
+  },
+  error: {
+    textAlign: 'center',
+    padding: '4rem',
+    color: '#ef4444',
+    fontSize: '1.25rem'
+  },
+  backBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    background: '#334155',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.625rem 1rem',
+    color: '#e2e8f0',
+    cursor: 'pointer',
+    fontSize: '0.875rem',
+    fontWeight: '500'
+  },
+  header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '1rem'
+  },
+  headerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem'
+  },
+  holdBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    background: '#8b5cf6',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.625rem 1rem',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '0.875rem',
+    fontWeight: '600'
+  },
+  escalateBtnHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    background: '#f59e0b',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.625rem 1rem',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '0.875rem',
+    fontWeight: '600'
+  },
+  statusBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    background: '#ef4444',
+    padding: '0.625rem 1rem',
+    borderRadius: '0.5rem',
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: '0.95rem'
+  },
+  infoRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '1.5rem',
+    marginBottom: '1.5rem'
+  },
+  accountSection: {
+    background: '#1e293b',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    border: '1px solid #334155'
+  },
+  cameraSection: {
+    background: '#1e293b',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    border: '1px solid #334155'
+  },
+  twoColumnLayout: {
+    display: 'grid',
+    gridTemplateColumns: '1.5fr 1fr',
+    gap: '1.5rem',
+    marginTop: '1.5rem'
+  },
+  rightPanel: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1rem'
+  },
+  bottomRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr 1fr',
+    gap: '1.5rem',
+    marginTop: '1.5rem'
+  },
+  bottomSection: {
+    background: '#1e293b',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    border: '1px solid #334155'
+  },
+  sectionTitle: {
+    fontSize: '1rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    marginBottom: '0.75rem',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem'
+  },
+  noMedia: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '2rem',
+    gap: '1rem',
+    textAlign: 'center',
+    color: '#64748b',
+    minHeight: '300px'
+  },
+  toggleBtn: {
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.375rem',
+    padding: '0.5rem 1rem',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    cursor: 'pointer'
+  },
+  liveVideoContainer: {
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    padding: '1rem'
+  },
+  rtspInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    color: '#94a3b8',
+    fontSize: '0.85rem',
+    marginBottom: '1rem',
+    padding: '0.75rem',
+    background: '#1e293b',
+    borderRadius: '0.375rem'
+  },
+  liveVideoNote: {
+    color: '#94a3b8',
+    fontSize: '0.85rem',
+    fontStyle: 'italic',
+    padding: '0.75rem',
+    background: '#1e293b',
+    borderRadius: '0.375rem'
+  },
+  notesInput: {
+    width: '100%',
+    minHeight: '120px',
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: '0.5rem',
+    padding: '0.75rem',
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    resize: 'vertical',
+    fontFamily: 'inherit',
+    outline: 'none'
+  },
+  infoCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  accountInfoCompact: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  compactRow: {
+    display: 'flex',
+    gap: '1rem',
+    alignItems: 'center',
+    padding: '0.625rem 0.75rem',
+    background: '#0f172a',
+    borderRadius: '0.375rem',
+    borderBottom: '1px solid #1e293b'
+  },
+  compactField: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    flex: '1'
+  },
+  compactFieldFull: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    flex: '1'
+  },
+  compactLabel: {
+    color: '#94a3b8',
+    fontSize: '0.85rem',
+    fontWeight: '500',
+    whiteSpace: 'nowrap'
+  },
+  compactValue: {
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    fontWeight: '500'
+  },
+  addressInline: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '0.25rem',
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    lineHeight: '1.4'
+  },
+  contactsList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  contactsListScrollable: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+    maxHeight: '200px',
+    overflowY: 'auto',
+    paddingRight: '0.5rem'
+  },
+  compactContactCard: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '0.625rem 0.75rem',
+    background: '#0f172a',
+    borderRadius: '0.375rem',
+    border: '1px solid #334155',
+    minHeight: '36px'
+  },
+  compactContactInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    flex: 1,
+    minWidth: 0
+  },
+  compactContactName: {
+    fontWeight: '600',
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    minWidth: '80px'
+  },
+  compactContactPhone: {
+    color: '#94a3b8',
+    fontSize: '0.875rem',
+    whiteSpace: 'nowrap'
+  },
+  compactCallBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#10b981',
+    border: 'none',
+    borderRadius: '0.375rem',
+    padding: '0.5rem',
+    color: '#fff',
+    cursor: 'pointer',
+    flexShrink: 0
+  },
+  contactCard: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '1rem',
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    border: '1px solid #334155'
+  },
+  contactName: {
+    fontWeight: '600',
+    color: '#e2e8f0',
+    marginBottom: '0.25rem'
+  },
+  contactPhone: {
+    color: '#94a3b8',
+    fontSize: '0.9rem'
+  },
+  callBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.375rem',
+    background: '#10b981',
+    border: 'none',
+    borderRadius: '0.375rem',
+    padding: '0.5rem 1rem',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    textDecoration: 'none',
+    cursor: 'pointer'
+  },
+  actions: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  escalateBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '0.5rem',
+    background: '#f59e0b',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    color: '#fff',
+    fontSize: '1rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    marginTop: '0.5rem'
+  },
+  resolveBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '0.5rem',
+    background: '#10b981',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    color: '#fff',
+    fontSize: '1rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    marginTop: '0.5rem'
+  },
+  field: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem'
+  },
+  fieldLabel: {
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    color: '#cbd5e1'
+  },
+  resolutionSelect: {
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: '0.5rem',
+    padding: '0.75rem',
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    outline: 'none',
+    cursor: 'pointer'
+  },
+  historyNotesContainer: {
+    padding: '1.5rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1.5rem',
+    minHeight: '300px'
+  },
+  historySection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  historySubtitle: {
+    fontSize: '1rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    margin: 0
+  },
+  historyNotes: {
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    color: '#cbd5e1',
+    fontSize: '0.9rem',
+    lineHeight: '1.6',
+    whiteSpace: 'pre-wrap'
+  },
+  callLogsList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  callLogCard: {
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    border: '1px solid #334155'
+  },
+  callLogHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: '0.5rem'
+  },
+  callLogContact: {
+    fontWeight: '600',
+    color: '#e2e8f0',
+    fontSize: '0.95rem'
+  },
+  callLogPhone: {
+    color: '#94a3b8',
+    fontSize: '0.85rem',
+    marginTop: '0.25rem'
+  },
+  callLogResolution: {
+    display: 'inline-block',
+    padding: '0.25rem 0.75rem',
+    borderRadius: '9999px',
+    fontSize: '0.75rem',
+    fontWeight: '600',
+    background: '#78350f',
+    color: '#fbbf24'
+  },
+  callLogNotes: {
+    color: '#cbd5e1',
+    fontSize: '0.85rem',
+    marginTop: '0.5rem',
+    fontStyle: 'italic'
+  },
+  callLogTime: {
+    color: '#64748b',
+    fontSize: '0.75rem',
+    marginTop: '0.5rem'
+  },
+  eventsTimeline: {
+    background: '#1e293b',
+    borderRadius: '0.75rem',
+    border: '1px solid #334155',
+    padding: '1rem',
+    marginBottom: '1.5rem'
+  },
+  timelineHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '1rem',
+    paddingBottom: '1rem',
+    borderBottom: '1px solid #334155'
+  },
+  timelineTitle: {
+    fontSize: '1.125rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    margin: 0
+  },
+  loadMoreBtn: {
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.375rem',
+    padding: '0.5rem 1rem',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background 0.2s'
+  },
+  timelineScroll: {
+    display: 'flex',
+    gap: '1rem',
+    overflowX: 'auto',
+    paddingBottom: '0.5rem'
+  },
+  timelineEvent: {
+    minWidth: '180px',
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    border: '2px solid #334155',
+    padding: '0.75rem',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem'
+  },
+  timelineEventActive: {
+    border: '2px solid #3b82f6',
+    background: '#1e293b'
+  },
+  timelineEventCurrent: {
+    border: '2px solid #f59e0b'
+  },
+  timelineEventHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '0.5rem'
+  },
+  timelineEventCamera: {
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis'
+  },
+  currentAlarmBadge: {
+    background: '#f59e0b',
+    color: '#fff',
+    fontSize: '0.65rem',
+    fontWeight: '700',
+    padding: '0.125rem 0.375rem',
+    borderRadius: '0.25rem',
+    whiteSpace: 'nowrap'
+  },
+  timelineEventTime: {
+    fontSize: '0.75rem',
+    color: '#94a3b8'
+  },
+  timelineEventMedia: {
+    fontSize: '0.7rem',
+    color: '#64748b',
+    fontWeight: '500'
+  },
+  timelineEventThumb: {
+    width: '100%',
+    height: '100px',
+    objectFit: 'cover',
+    borderRadius: '0.375rem',
+    marginTop: '0.25rem'
+  },
+  // Vertical Timeline Styles (for event list beside video)
+  eventsTimelineVertical: {
+    background: '#1e293b',
+    borderRadius: '0.75rem',
+    border: '1px solid #334155',
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%'
+  },
+  timelineHeaderVertical: {
+    padding: '1rem',
+    borderBottom: '1px solid #334155'
+  },
+  timelineScrollVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+    padding: '0.75rem',
+    overflowY: 'auto',
+    flex: 1,
+    maxHeight: 'calc(100vh - 400px)'
+  },
+  timelineEventVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '0.5rem',
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    border: '2px solid transparent',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    position: 'relative'
+  },
+  timelineEventVerticalActive: {
+    borderColor: '#3b82f6',
+    background: '#1e3a5f'
+  },
+  timelineEventContentVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+    position: 'relative'
+  },
+  timelineEventThumbVertical: {
+    width: '100%',
+    height: '80px',
+    objectFit: 'cover',
+    borderRadius: '0.375rem'
+  },
+  timelineEventInfoVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.25rem'
+  },
+  timelineEventCameraSmall: {
+    fontSize: '0.75rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis'
+  },
+  timelineEventTimeSmall: {
+    fontSize: '0.65rem',
+    color: '#94a3b8',
+    lineHeight: '1.2'
+  },
+  currentAlarmBadgeSmall: {
+    position: 'absolute',
+    top: '0.25rem',
+    right: '0.25rem',
+    background: '#065f46',
+    color: '#10b981',
+    padding: '0.125rem 0.375rem',
+    borderRadius: '0.25rem',
+    fontSize: '0.625rem',
+    fontWeight: '700',
+    zIndex: 1
+  },
+  timelineEventDetailsVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.25rem',
+    flex: 1,
+    minWidth: 0
+  },
+  timelineEventHeaderVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.25rem'
+  },
+  // Action Plan Styles
+  actionPlanContainer: {
+    background: '#1e293b',
+    borderRadius: '0.75rem',
+    border: '1px solid #334155',
+    padding: '1.5rem',
+    marginBottom: '1.5rem'
+  },
+  actionPlanTitle: {
+    fontSize: '1.25rem',
+    fontWeight: '700',
+    color: '#e2e8f0',
+    marginBottom: '1rem',
+    margin: 0,
+    paddingBottom: '1rem',
+    borderBottom: '2px solid #334155'
+  },
+  actionPlanContent: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 300px',
+    gap: '2rem'
+  },
+  noActionPlan: {
+    background: '#1e293b',
+    borderRadius: '0.5rem',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  actionPlanChecklist: {
+    flex: 1
+  },
+  actionPlanSubtitle: {
+    fontSize: '1rem',
+    fontWeight: '600',
+    color: '#cbd5e1',
+    marginBottom: '1rem'
+  },
+  actionPlanSteps: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  actionPlanStep: {
+    display: 'flex',
+    gap: '0.75rem',
+    alignItems: 'flex-start',
+    padding: '1rem',
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    border: '1px solid #334155'
+  },
+  stepNumber: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '28px',
+    height: '28px',
+    background: '#334155',
+    borderRadius: '50%',
+    color: '#e2e8f0',
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    flexShrink: 0
+  },
+  stepContent: {
+    flex: 1
+  },
+  checkboxLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    cursor: 'pointer',
+    color: '#e2e8f0',
+    fontSize: '0.95rem'
+  },
+  checkbox: {
+    width: '20px',
+    height: '20px',
+    cursor: 'pointer',
+    accentColor: '#10b981'
+  },
+  stepTextCompleted: {
+    textDecoration: 'line-through',
+    color: '#64748b'
+  },
+  toolStep: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '1rem'
+  },
+  toolInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    flex: 1
+  },
+  toolIcon: {
+    fontSize: '1.25rem'
+  },
+  toolButton: {
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.375rem',
+    padding: '0.5rem 1rem',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap'
+  },
+  completedBadge: {
+    background: '#065f46',
+    color: '#10b981',
+    padding: '0.25rem 0.5rem',
+    borderRadius: '0.25rem',
+    fontSize: '0.75rem',
+    fontWeight: '600'
+  },
+  quickTools: {
+    background: '#0f172a',
+    borderRadius: '0.5rem',
+    padding: '1rem',
+    border: '1px solid #334155',
+    height: 'fit-content'
+  },
+  quickToolsList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  quickToolBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '0.5rem',
+    padding: '0.875rem 1rem',
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    fontWeight: '500',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    textAlign: 'left'
+  },
+  // Grid Modal Styles
+  modalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: 'rgba(0, 0, 0, 0.75)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000
+  },
+  gridModal: {
+    background: '#1e293b',
+    borderRadius: '0.75rem',
+    border: '1px solid #334155',
+    width: '95vw',
+    maxWidth: '1600px',
+    maxHeight: '90vh',
+    display: 'flex',
+    flexDirection: 'column'
+  },
+  gridModalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '1.5rem',
+    borderBottom: '1px solid #334155'
+  },
+  modalTitle: {
+    fontSize: '1.5rem',
+    fontWeight: '700',
+    color: '#e2e8f0',
+    margin: 0
+  },
+  closeBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#94a3b8',
+    cursor: 'pointer',
+    padding: '0.5rem',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  gridModalContent: {
+    flex: 1,
+    overflow: 'auto',
+    padding: '1.5rem'
+  },
+  gridCameraName: {
+    fontWeight: '600',
+    color: '#e2e8f0'
+  },
+  gridCameraLocation: {
+    fontSize: '0.75rem',
+    color: '#94a3b8'
+  },
+  gridModalFooter: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    padding: '1.5rem',
+    borderTop: '1px solid #334155',
+    gap: '1rem'
+  },
+  cancelBtn: {
+    background: '#334155',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.75rem 1.5rem',
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    fontWeight: '600',
+    cursor: 'pointer'
+  },
+  // Boolean Step Styles
+  booleanStep: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  booleanQuestion: {
+    fontSize: '1rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    marginBottom: '0.25rem'
+  },
+  booleanButtons: {
+    display: 'flex',
+    gap: '0.75rem'
+  },
+  booleanBtn: {
+    flex: 1,
+    padding: '0.875rem 1.5rem',
+    border: '2px solid #334155',
+    borderRadius: '0.5rem',
+    background: '#0f172a',
+    color: '#94a3b8',
+    fontSize: '1rem',
+    fontWeight: '700',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em'
+  },
+  booleanBtnYesActive: {
+    background: '#065f46',
+    borderColor: '#10b981',
+    color: '#10b981',
+    boxShadow: '0 0 0 3px rgba(16, 185, 129, 0.1)'
+  },
+  booleanBtnNoActive: {
+    background: '#7c2d12',
+    borderColor: '#f97316',
+    color: '#f97316',
+    boxShadow: '0 0 0 3px rgba(249, 115, 22, 0.1)'
+  },
+  branchSteps: {
+    marginTop: '0.5rem',
+    paddingLeft: '1.5rem',
+    borderLeft: '3px solid #334155',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem'
+  },
+  branchLabel: {
+    fontSize: '0.875rem',
+    fontWeight: '700',
+    color: '#3b82f6',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    marginBottom: '0.25rem'
+  },
+  branchStepItem: {
+    display: 'flex',
+    gap: '0.75rem',
+    alignItems: 'flex-start',
+    padding: '0.75rem',
+    background: '#0f172a',
+    borderRadius: '0.375rem',
+    border: '1px solid #1e293b'
+  },
+  branchStepNumber: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '32px',
+    height: '24px',
+    background: '#1e293b',
+    borderRadius: '0.25rem',
+    color: '#64748b',
+    fontSize: '0.75rem',
+    fontWeight: '600',
+    flexShrink: 0
+  },
+  branchStepContent: {
+    flex: 1
+  },
+  // Escalate Modal Styles
+  escalateModal: {
+    background: '#1e293b',
+    borderRadius: '0.75rem',
+    width: '100%',
+    maxWidth: '500px',
+    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)',
+    border: '1px solid #334155'
+  },
+  escalateModalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '1.5rem',
+    borderBottom: '1px solid #334155'
+  },
+  escalateModalTitle: {
+    margin: 0,
+    fontSize: '1.25rem',
+    fontWeight: '600',
+    color: '#e2e8f0'
+  },
+  escalateModalCloseBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#94a3b8',
+    cursor: 'pointer',
+    padding: '0.25rem',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: '0.375rem',
+    transition: 'all 0.2s'
+  },
+  escalateModalBody: {
+    padding: '1.5rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1rem'
+  },
+  escalateModalLabel: {
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    fontWeight: '600',
+    marginBottom: '0.5rem'
+  },
+  escalateModalTextarea: {
+    width: '100%',
+    padding: '0.75rem',
+    background: '#0f172a',
+    border: '1px solid #334155',
+    borderRadius: '0.5rem',
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    fontFamily: 'inherit',
+    resize: 'vertical',
+    outline: 'none',
+    transition: 'border-color 0.2s'
+  },
+  escalateModalFooter: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '0.75rem',
+    padding: '1.5rem',
+    borderTop: '1px solid #334155'
+  },
+  escalateModalCancelBtn: {
+    background: '#334155',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.75rem 1.5rem',
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s'
+  },
+  escalateModalConfirmBtn: {
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.75rem 1.5rem',
+    color: 'white',
+    fontSize: '0.95rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    transition: 'all 0.2s'
+  },
+  holdModalConfirmBtn: {
+    background: '#8b5cf6',
+    border: 'none',
+    borderRadius: '0.5rem',
+    padding: '0.75rem 1.5rem',
+    color: 'white',
+    fontSize: '0.95rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+    transition: 'all 0.2s'
+  },
+  tabNavigation: {
+    display: 'flex',
+    gap: '0.5rem',
+    marginBottom: '1.5rem',
+    borderBottom: '2px solid #334155',
+    paddingBottom: '0.5rem'
+  },
+  tabButton: {
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '3px solid transparent',
+    padding: '0.75rem 1.5rem',
+    color: '#94a3b8',
+    fontSize: '1rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    position: 'relative',
+    bottom: '-0.5rem'
+  },
+  tabButtonActive: {
+    color: '#3b82f6',
+    borderBottom: '3px solid #3b82f6'
+  },
+  tabContent: {
+    animation: 'fadeIn 0.3s ease-in'
+  }
+}

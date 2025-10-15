@@ -1,0 +1,12 @@
+
+# Fix SMTP server binding issues
+# In your smtp_server.py, change the binding address:
+
+# OLD (problematic):
+# self.controller = Controller(self.handler, hostname='0.0.0.0', port=2525)
+
+# NEW (fixed):
+self.controller = Controller(self.handler, hostname='127.0.0.1', port=2525)
+
+# Or use a different port if 2525 is blocked:
+self.controller = Controller(self.handler, hostname='127.0.0.1', port=2526)

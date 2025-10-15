@@ -1,0 +1,41 @@
+# Systemd service for Video Monitoring SMTP Server
+# Place in: /etc/systemd/system/videomonitoring-smtp.service
+# Enable: sudo systemctl enable videomonitoring-smtp
+# Start: sudo systemctl start videomonitoring-smtp
+
+[Unit]
+Description=Video Monitoring SMTP Server
+After=network.target videomonitoring-backend.service
+Requires=videomonitoring-backend.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/videomonitoring/backend
+Environment="PATH=/var/www/videomonitoring/venv/bin"
+Environment="PYTHONPATH=/var/www/videomonitoring/backend"
+
+# Note: SMTP server is started as part of main.py
+# This is a placeholder if you want to run it separately
+ExecStart=/var/www/videomonitoring/venv/bin/python smtp_server.py
+
+# Restart on failure
+Restart=always
+RestartSec=10s
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/videomonitoring/uploads /var/www/videomonitoring/backend /var/log/videomonitoring
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=videomonitoring-smtp
+
+[Install]
+WantedBy=multi-user.target
+

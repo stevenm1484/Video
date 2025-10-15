@@ -1,0 +1,13 @@
+#!/bin/bash
+# Run this script on the PBX as the recordings_api user
+# Copy and paste this entire file into the PBX terminal
+
+cat > ~/.ssh/authorized_keys << 'ENDOFKEY'
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC4ZoaXoiKJ+FHg4/6wNqYLkEktpC8sqCBNCVpkIAadQrQg3RWo6YZ3+RvkOyJNYbkhYUzKY48ez8v6KAoPfX+XpZjzHAPDM8b5K8wP1Q1eaX6DfaDFJESJSdiBIVlQntzqE0FcgyWrsSCl7Y3Nu49gMz0FcD9LIW9+v1vWgG3AwXCiZS5IYZf1pmKYV1bIgrBArm8lRnid4UU7q3BCOm5XM1HKCnLmd/0lgCn26Qjr6SHW8iF1LYKhFa60KjuGQ3WUxfw0o9mgerGfhqPxgvfodLoJw6hs/JYgwurXOJszHeHw2vO4DvXrCfavTQjUNJO5CKFl1aihMUa/L3gyezcNy+RzXv6gQDDMP+9cnRrTbKHYIp7Lz8YupK4cLjaEESR9RnFDxMFeKqcZNd07UGyXmTjleU+amGa5oHd8EUflHEoIVjMaT3K8b3l1datmx4k4ygMzehkmLCMIQeV2Up4lyBz9MwZrgFc9jG+528RQ//nQXx42Ff0/0VBGcnZe6zJDmJb78R4R5bflMut1utaI7i28U+qfImfYIKbIB5U/xQf7ANHsp84VVRF0HxQ5eLlpbRvdVy0dO8cRgZISEO3w2JRUCI3SEWnYeyctYgc3ssnJh60MRUW2OELS3UH8PAjc35FNuvAlH976EyAVN6kUSHLTnJc3x9vMrXNVUxO11Q== videomonitoring-recording-retrieval
+ENDOFKEY
+
+chmod 600 ~/.ssh/authorized_keys
+
+echo "Key installed successfully!"
+echo "Verifying key (should be ONE line):"
+wc -l ~/.ssh/authorized_keys

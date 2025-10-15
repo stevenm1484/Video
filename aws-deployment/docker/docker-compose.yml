@@ -1,0 +1,96 @@
+# Docker Compose for Video Monitoring Dashboard
+# Run with: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: videomonitoring
+      POSTGRES_USER: videomonitor
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - videomonitoring
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U videomonitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis cache (optional)
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - videomonitoring
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend application
+  backend:
+    build:
+      context: ../..
+      dockerfile: aws-deployment/docker/Dockerfile
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://videomonitor:${DB_PASSWORD:-changeme}@db/videomonitoring
+      SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - uploads_data:/app/uploads
+      - streams_data:/app/streams
+    ports:
+      - "8000:8000"
+      - "2525:2525"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - videomonitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/users/me"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - uploads_data:/var/www/videomonitoring/uploads:ro
+      - streams_data:/var/www/videomonitoring/streams:ro
+      - ssl_certs:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    networks:
+      - videomonitoring
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
+  streams_data:
+  ssl_certs:
+
+networks:
+  videomonitoring:
+    driver: bridge
+

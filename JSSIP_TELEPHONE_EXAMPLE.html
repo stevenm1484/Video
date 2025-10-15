@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JsSIP WebRTC Telephone Integration - Reference Example</title>
+    <style>
+        /* This is a reference example showing how to properly integrate JsSIP for WebRTC telephony */
+        /* Extracted from a working DICE CM implementation */
+        body { font-family: 'Segoe UI', sans-serif; padding: 20px; background: #f5f7fa; }
+        .note { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 8px; }
+        .code-block { background: #2d2d2d; color: #f8f8f2; padding: 15px; border-radius: 8px; overflow-x: auto; margin: 10px 0; }
+        .success { color: #10b981; font-weight: bold; }
+        .warning { color: #f59e0b; font-weight: bold; }
+        .error { color: #ef4444; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>📞 JsSIP WebRTC Telephone Integration - Reference Example</h1>
+
+    <div class="note">
+        <strong>Purpose:</strong> This file serves as a reference for implementing WebRTC telephone connectivity using JsSIP library.
+        <br><strong>Source:</strong> Extracted from working DICE CM implementation (Scutum Security)
+        <br><strong>Use Case:</strong> SIP/WebRTC calling from web applications
+    </div>
+
+    <h2>🔑 Key Configuration Elements</h2>
+
+    <div class="code-block">
+        <pre>
+// CRITICAL JSSIP CONFIGURATION PATTERNS FROM WORKING IMPLEMENTATION:
+
+// 1. ENABLE DEBUG MODE (Critical for troubleshooting)
+JsSIP.debug.enable('JsSIP:*');
+console.log('✅ JsSIP debugging enabled');
+
+// 2. WEBSOCKET CONNECTION - Use wss:// for secure connections
+const socket = new JsSIP.WebSocketInterface('wss://your-pbx-server.com:port/ws');
+
+// 3. USER AGENT CONFIGURATION
+const configuration = {
+    sockets: [socket],
+    uri: 'sip:extension@domain.com',  // Your SIP URI
+    password: 'your-sip-password',
+    display_name: 'Display Name',
+    session_timers: false,
+
+    // REGISTRATION SETTINGS
+    register: true,
+    register_expires: 600,  // 10 minutes
+
+    // CONNECTION RECOVERY
+    connection_recovery_min_interval: 2,
+    connection_recovery_max_interval: 30,
+
+    // ADDITIONAL OPTIONS THAT MAY HELP
+    no_answer_timeout: 60,
+    use_preloaded_route: false
+};
+
+// 4. CREATE USER AGENT
+const ua = new JsSIP.UA(configuration);
+
+// 5. ESSENTIAL EVENT HANDLERS
+ua.on('connected', function(e) {
+    console.log('✅ WebSocket connected');
+});
+
+ua.on('disconnected', function(e) {
+    console.error('❌ WebSocket disconnected:', e);
+});
+
+ua.on('registered', function(e) {
+    console.log('✅ Successfully registered to PBX');
+});
+
+ua.on('unregistered', function(e) {
+    console.log('⚠️ Unregistered from PBX');
+});
+
+ua.on('registrationFailed', function(e) {
+    console.error('❌ Registration failed:', e.cause);
+    // e.cause contains the SIP response code and reason
+});
+
+ua.on('newRTCSession', function(e) {
+    const session = e.session;
+    console.log('📞 New RTC session:', session.direction);
+
+    if (session.direction === 'incoming') {
+        // Handle incoming call
+        console.log('📞 Incoming call from:', session.remote_identity.uri);
+        // session.answer() or session.terminate()
+    } else {
+        // Outgoing call
+    }
+});
+
+// 6. START THE USER AGENT
+ua.start();
+console.log('🚀 User Agent started');
+        </pre>
+    </div>
+
+    <h2>🐛 Common Issues and Solutions</h2>
+
+    <h3 class="warning">Issue 1: WebSocket Connection Fails</h3>
+    <div class="code-block">
+        <pre>
+// SYMPTOM: WebSocket connection to 'wss://server:port/ws' failed
+// CAUSES:
+// - Wrong port number
+// - Missing /ws path in WebSocket URL
+// - Certificate issues (for wss://)
+// - Firewall blocking the port
+// - PBX server not accepting WebSocket connections
+
+// SOLUTION:
+// 1. Verify correct WebSocket endpoint with PBX admin
+// 2. Common ports: 7443, 8089, 5061, 5060
+// 3. Check if path is needed: /ws, /sip, etc.
+// 4. Test with wscat: wscat -c wss://server:port/ws
+        </pre>
+    </div>
+
+    <h3 class="warning">Issue 2: WebSocket Connects but Registration Fails</h3>
+    <div class="code-block">
+        <pre>
+// SYMPTOM: 'connected' event fires, but 'registrationFailed' event occurs
+// CAUSES:
+// - Wrong SIP credentials (extension/password)
+// - Wrong SIP domain
+// - Extension not configured on PBX
+// - Authentication method mismatch
+
+// SOLUTION:
+// Check the e.cause in registrationFailed event:
+ua.on('registrationFailed', function(e) {
+    console.error('Registration failed:', {
+        cause: e.cause,           // SIP response code
+        response: e.response      // Full SIP response
+    });
+});
+
+// Common SIP response codes:
+// 401 Unauthorized - Wrong password
+// 403 Forbidden - Extension not allowed to register
+// 404 Not Found - Extension doesn't exist
+// 408 Request Timeout - Network/connectivity issue
+        </pre>
+    </div>
+
+    <h3 class="warning">Issue 3: Debug Output Not Showing</h3>
+    <div class="code-block">
+        <pre>
+// PROBLEM: Can't see what's happening internally in JsSIP
+
+// SOLUTION: Enable debug BEFORE creating UA
+JsSIP.debug.enable('JsSIP:*');
+
+// Or enable specific modules:
+JsSIP.debug.enable('JsSIP:UA');
+JsSIP.debug.enable('JsSIP:WebSocketInterface');
+JsSIP.debug.enable('JsSIP:Registrator');
+JsSIP.debug.enable('JsSIP:RTCSession');
+
+// Disable in production:
+if (import.meta.env.PROD) {
+    JsSIP.debug.disable('JsSIP:*');
+}
+        </pre>
+    </div>
+
+    <h2>📋 Testing Checklist</h2>
+    <ul>
+        <li class="success">✅ JsSIP library loaded successfully</li>
+        <li class="success">✅ Debug mode enabled for troubleshooting</li>
+        <li class="success">✅ WebSocket URL includes protocol (wss://), host, port</li>
+        <li class="success">✅ SIP URI format: sip:extension@domain</li>
+        <li class="success">✅ Password is correct and not empty</li>
+        <li class="success">✅ All essential event handlers attached BEFORE ua.start()</li>
+        <li class="success">✅ Browser console shows connection/registration messages</li>
+        <li class="success">✅ No CORS or certificate errors in console</li>
+    </ul>
+
+    <h2>🔍 Debugging Steps</h2>
+    <ol>
+        <li><strong>Enable JsSIP debug mode</strong> - See detailed internal logs</li>
+        <li><strong>Check browser console</strong> - Look for WebSocket errors</li>
+        <li><strong>Verify WebSocket endpoint</strong> - Correct protocol, host, port, path</li>
+        <li><strong>Test WebSocket manually</strong> - Use wscat or browser tools</li>
+        <li><strong>Verify SIP credentials</strong> - Extension and password</li>
+        <li><strong>Check PBX server logs</strong> - See what the server receives</li>
+        <li><strong>Test with SIP phone</strong> - Verify extension works outside web app</li>
+        <li><strong>Check network/firewall</strong> - Ensure ports are open</li>
+    </ol>
+
+    <h2>🔗 Important WebSocket URL Formats</h2>
+    <div class="code-block">
+        <pre>
+// Different PBX systems use different WebSocket paths:
+
+// Format 1: With /ws path (common)
+wss://pbx.domain.com:8089/ws
+
+// Format 2: With /sip path
+wss://pbx.domain.com:7443/sip
+
+// Format 3: No path
+wss://pbx.domain.com:5061
+
+// Format 4: With custom path
+wss://pbx.domain.com:8089/asterisk/ws
+
+// YOUR CONFIGURATION:
+// Domain: ipbx.statewidecentralstation.com
+// Port: 8089
+// Try these combinations:
+// - wss://ipbx.statewidecentralstation.com:8089
+// - wss://ipbx.statewidecentralstation.com:8089/ws
+// - wss://ipbx.statewidecentralstation.com:8089/sip
+        </pre>
+    </div>
+
+    <h2>📞 Making Calls</h2>
+    <div class="code-block">
+        <pre>
+// Only make calls AFTER successful registration
+if (ua.isRegistered()) {
+    const eventHandlers = {
+        'progress': function(e) {
+            console.log('Call is in progress');
+        },
+        'failed': function(e) {
+            console.error('Call failed:', e.cause);
+        },
+        'ended': function(e) {
+            console.log('Call ended');
+        },
+        'confirmed': function(e) {
+            console.log('Call confirmed');
+        }
+    };
+
+    const options = {
+        eventHandlers: eventHandlers,
+        mediaConstraints: { audio: true, video: false },
+        rtcOfferConstraints: {
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: false
+        }
+    };
+
+    const session = ua.call('sip:number@domain.com', options);
+}
+        </pre>
+    </div>
+
+    <h2>🎯 Key Takeaways from Working Implementation</h2>
+    <ul>
+        <li><strong>Always enable debug mode during setup</strong> - Disable only in production</li>
+        <li><strong>WebSocket path matters</strong> - Some PBX systems need /ws, some don't</li>
+        <li><strong>Event handlers before start()</strong> - Attach all handlers before calling ua.start()</li>
+        <li><strong>Check registrationFailed cause</strong> - It tells you exactly what went wrong</li>
+        <li><strong>Test credentials separately</strong> - Use SIP phone to verify extension works</li>
+        <li><strong>Port and protocol</strong> - wss:// for secure, correct port number</li>
+    </ul>
+
+    <div class="note">
+        <strong>📝 Note:</strong> This example is based on a working implementation from DICE CM (Scutum Security).
+        The patterns shown here have been tested and verified in production environments.
+        <br><br>
+        <strong>🔧 For your specific setup:</strong>
+        <ul>
+            <li>PBX Server: ipbx.statewidecentralstation.com</li>
+            <li>Port: 8089</li>
+            <li>Extension: 1001</li>
+            <li>Password: Statewide123#!</li>
+        </ul>
+        <br>
+        <strong class="warning">⚠️ Next Steps:</strong> Try adding /ws path to WebSocket URL and enable JsSIP debug mode
+    </div>
+</body>
+</html>

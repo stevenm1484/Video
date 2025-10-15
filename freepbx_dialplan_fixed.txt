@@ -1,0 +1,39 @@
+[inbound-webhook-park]
+; Inbound -> POST JSON (no slot yet) -> silent park (MOH).
+; Your server learns the slot via AMI ParkedCall (match on UNIQUEID).
+
+exten => s,1,Answer()
+  same => n,Set(CALL_TS=${STRFTIME(${EPOCH},,%Y-%m-%dT%H:%M:%S%z)})
+  same => n,NoOp(Inbound ${CALLERID(num)} uniqueid=${UNIQUEID} at ${CALL_TS})
+
+  ; -------- JSON body (no slot yet) --------
+  same => n,Set(PAYLOAD={"caller_id_num":"${CALLERID(num)}","caller_id_name":"${CALLERID(name)}","uniqueid":"${UNIQUEID}","parked_slot":"","lot":"default","timeout_sec":300})
+
+  ; -------- HMAC over EXACT body above (base64) --------
+  same => n,Set(SHARED_SECRET=L0ng!S3cretKeyfor$haR3)
+  same => n,Set(SIGNATURE=${SHELL(printf '%s' '${PAYLOAD}' | openssl dgst -sha256 -hmac '${SHARED_SECRET}' -binary | openssl base64 -A)})
+
+  ; -------- POST (proper headers, JSON body) - ALL ON ONE LINE --------
+  same => n,Set(WEBHOOK_URL=https://video.statewidecentralstation.com/api/inbound_call)
+  same => n,System(curl -sS -m 10 -X POST -H "Content-Type: application/json" -H "X-Signature: sha256=${SIGNATURE}" --data '${PAYLOAD}' ${WEBHOOK_URL})
+  same => n,NoOp(Webhook POST status=${SYSTEMSTATUS})
+
+  ; -------- Silent park (no slot announcement) --------
+  same => n,Set(CHANNEL(parkinglot)=default)
+  same => n,Set(PARK_TIMEOUT=300)
+  same => n,Park(default,st(${PARK_TIMEOUT}))
+  same => n,Hangup()
+
+
+KEY CHANGES:
+============
+
+1. Changed parked_slot from null to "" (empty string) - JSON null might be causing issues
+2. Put the entire curl command on ONE LINE (removed backslashes and line breaks)
+3. Changed --data-binary to --data (simpler, should work fine)
+4. Removed the underscore from Set(_PAYLOAD=...) - changed to Set(PAYLOAD=...)
+
+The main issue was likely the multi-line curl command with backslashes. Asterisk's System()
+application doesn't handle multi-line commands well.
+
+Try this version and let me know if it works!

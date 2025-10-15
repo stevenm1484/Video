@@ -1,0 +1,48 @@
+# Systemd service for Video Monitoring Backend
+# Place in: /etc/systemd/system/videomonitoring-backend.service
+# Enable: sudo systemctl enable videomonitoring-backend
+# Start: sudo systemctl start videomonitoring-backend
+
+[Unit]
+Description=Video Monitoring Backend (FastAPI)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/videomonitoring/backend
+Environment="PATH=/var/www/videomonitoring/venv/bin"
+Environment="SECRET_KEY=your-secret-key-change-this-in-production"
+Environment="DATABASE_URL=sqlite:////var/www/videomonitoring/backend/video_monitoring.db"
+# For PostgreSQL:
+# Environment="DATABASE_URL=postgresql://videomonitor:password@localhost/videomonitoring"
+
+ExecStart=/var/www/videomonitoring/venv/bin/gunicorn \
+    --config /var/www/videomonitoring/gunicorn.conf.py \
+    main:app
+
+# Restart on failure
+Restart=always
+RestartSec=10s
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/videomonitoring/uploads /var/www/videomonitoring/streams /var/www/videomonitoring/backend /var/log/videomonitoring
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=videomonitoring-backend
+
+[Install]
+WantedBy=multi-user.target
+

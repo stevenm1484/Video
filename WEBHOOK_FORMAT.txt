@@ -1,0 +1,87 @@
+================================================================================
+WEBHOOK FORMAT GUIDE
+================================================================================
+
+WHAT I RECEIVED (WRONG ❌)
+--------------------------
+
+Request 1:
+  URL: POST /api/inbound_call|{event:inbound_call HTTP/1.1
+  Status: 404 (URL is malformed - has pipe character)
+
+Request 2:
+  URL: POST /api/inbound_call HTTP/1.1
+  Body: status
+  Status: 400 (Invalid JSON)
+  Error: "Invalid JSON in webhook payload: status"
+
+
+WHAT IT SHOULD LOOK LIKE (CORRECT ✅)
+--------------------------------------
+
+POST /api/inbound_call HTTP/1.1
+Host: video.statewidecentralstation.com
+Content-Type: application/json
+X-Signature: sha256=<base64_hmac_signature>
+
+{
+  "caller_id_num": "9178162014",
+  "caller_id_name": "John Doe",
+  "uniqueid": "1728849600.123",
+  "parked_slot": "71",
+  "lot": "default",
+  "timeout_sec": 300
+}
+
+
+REQUIRED FIELDS
+---------------
+Minimum required:
+  - caller_id_num: The phone number calling in (e.g., "9178162014")
+  - parked_slot: The parking slot number (e.g., "71")
+
+Optional but recommended:
+  - caller_id_name: Caller's name
+  - uniqueid: Asterisk channel unique ID
+  - lot: Parking lot name (default: "default")
+  - timeout_sec: Parking timeout in seconds (default: 300)
+
+Security:
+  - X-Signature header must contain HMAC-SHA256 signature
+  - Secret key: L0ng!S3cretKeyfor$haR3
+  - Format: sha256=<base64_encoded_signature>
+
+
+EXAMPLE VALID WEBHOOK (using curl)
+-----------------------------------
+
+curl -X POST https://video.statewidecentralstation.com/api/inbound_call \
+  -H "Content-Type: application/json" \
+  -H "X-Signature: sha256=ABC123..." \
+  -d '{
+    "caller_id_num": "9178162014",
+    "caller_id_name": "Front Door",
+    "uniqueid": "1728849600.123",
+    "parked_slot": "71"
+  }'
+
+
+WHAT YOUR FREEPBX IS CURRENTLY SENDING
+---------------------------------------
+❌ URL with pipe character: /api/inbound_call|{event:inbound_call
+❌ Plain text body: status
+❌ No JSON formatting
+❌ No Content-Type: application/json header
+❌ No X-Signature header
+
+
+FIX NEEDED IN FREEPBX
+---------------------
+You need to fix your FreePBX webhook/dialplan configuration to:
+1. Send proper URL without pipe characters
+2. Send JSON formatted data (not plain text)
+3. Set Content-Type header to application/json
+4. Calculate and include HMAC-SHA256 signature in X-Signature header
+
+The webhook endpoint on the server is working correctly - it's just
+rejecting the malformed data (which is the correct security behavior).

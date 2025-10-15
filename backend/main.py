@@ -2808,7 +2808,7 @@ async def capture_live_view_for_event(
         # -c:v: Video codec (copy = direct stream copy, faster)
         # -c:a: Audio codec (copy = direct stream copy)
         cmd = [
-            "ffmpeg",
+            "/usr/local/bin/ffmpeg",
             "-rtsp_transport", "tcp",
             "-i", rtsp_url,
             "-t", str(duration_seconds),

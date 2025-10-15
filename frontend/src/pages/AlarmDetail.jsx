@@ -492,6 +492,21 @@ export default function AlarmDetail() {
       const statusResponse = await api.get(`/cameras/${cameraId}/stream-status`)
       console.log('Stream status:', statusResponse.data)
 
+      // Auto-capture this live view in the background (don't wait for it)
+      // Trigger capture regardless of whether stream was already running or not
+      if (alarm && alarm.event_id) {
+        console.log(`Auto-capturing live view for camera ${cameraId}, event ${alarm.event_id}`)
+        api.post(`/events/${alarm.event_id}/capture-live-view`, null, {
+          params: {
+            camera_id: cameraId,
+            duration_seconds: 10
+          }
+        }).catch(err => {
+          console.error('Failed to auto-capture live view:', err)
+          // Don't show error to user - this is a background operation
+        })
+      }
+
       // If stream is already running, just load it immediately (no polling needed)
       if (statusResponse.data.is_streaming && statusResponse.data.stream_url) {
         console.log('Stream already running, loading immediately without polling')
@@ -511,21 +526,6 @@ export default function AlarmDetail() {
           if (status.data.stream_url) {
             const readyTime = (attempt + 1) * 500
             console.log(`✓ Stream ready after ${readyTime}ms`)
-
-            // Auto-capture this live view in the background (don't wait for it)
-            if (alarm && alarm.event_id) {
-              console.log(`Auto-capturing live view for camera ${cameraId}, event ${alarm.event_id}`)
-              api.post(`/events/${alarm.event_id}/capture-live-view`, null, {
-                params: {
-                  camera_id: cameraId,
-                  duration_seconds: 10
-                }
-              }).catch(err => {
-                console.error('Failed to auto-capture live view:', err)
-                // Don't show error to user - this is a background operation
-              })
-            }
-
             break
           }
         }

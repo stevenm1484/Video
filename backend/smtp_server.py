@@ -269,6 +269,15 @@ class CustomSMTPHandler:
             db.commit()
             db.refresh(event)
 
+            # Activity Tracking: Increment event counters and check thresholds
+            try:
+                from activity_tracking_service import ActivityTrackingService
+                activity_service = ActivityTrackingService(db)
+                activity_service.increment_event_count(camera.id)
+            except Exception as e:
+                logger.error(f"[SMTP] Error tracking activity: {e}")
+                # Don't fail the event creation if activity tracking fails
+
             # Log audit action
             from audit_helper import log_audit_action
             log_audit_action(

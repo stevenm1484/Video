@@ -37,6 +37,9 @@ frontend/build/
 *~
 .DS_Store
 
+# Claude Code settings (may contain sensitive data)
+.claude/settings.local.json
+
 # Uploads and media files
 backend/uploads/
 uploads/

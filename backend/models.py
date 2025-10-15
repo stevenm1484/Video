@@ -143,6 +143,15 @@ class VideoAccount(Base):
     vital_signs_image_change_enabled = Column(Boolean, default=False)  # Enable image change detection
     vital_signs_image_change_threshold = Column(Integer, default=50)  # Percentage threshold for image change (0-100)
 
+    # Activity Tracking and Billing - Account level settings
+    monthly_event_count = Column(Integer, default=0)  # Count of events this billing period
+    activity_threshold_warning = Column(Integer, nullable=True)  # Send warning email when this count is reached (NULL = disabled)
+    activity_snooze_threshold = Column(Integer, nullable=True)  # Auto-snooze account when this count is reached (NULL = disabled)
+    activity_last_warning_sent_at = Column(DateTime, nullable=True)  # When last warning was sent
+    activity_auto_snoozed_at = Column(DateTime, nullable=True)  # When auto-snooze was triggered
+    activity_billing_period_start = Column(DateTime, default=datetime.utcnow)  # Start of current billing period
+    activity_billing_period_end = Column(DateTime, nullable=True)  # End of current billing period
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -205,6 +214,13 @@ class Camera(Base):
     # Format: [{"type": "tool", "tool_id": 1, "relay_number": 2, "label": "Unlock Door"},
     #          {"type": "tool_group", "group_id": 1, "label": "Open Gate"}]
     associated_actions = Column(JSON, default=list)
+
+    # Activity Tracking and Billing - Camera level overrides (NULL = use account setting)
+    monthly_event_count = Column(Integer, default=0)  # Count of events this billing period for this camera
+    activity_threshold_warning = Column(Integer, nullable=True)  # Override account warning threshold (NULL = use account setting)
+    activity_snooze_threshold = Column(Integer, nullable=True)  # Override account snooze threshold (NULL = use account setting)
+    activity_last_warning_sent_at = Column(DateTime, nullable=True)  # When last warning was sent for this camera
+    activity_auto_snoozed_at = Column(DateTime, nullable=True)  # When auto-snooze was triggered for this camera
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

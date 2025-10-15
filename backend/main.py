@@ -2131,10 +2131,166 @@ async def delete_account(
     db_account = db.query(VideoAccount).filter(VideoAccount.id == account_id).first()
     if not db_account:
         raise HTTPException(status_code=404, detail="Account not found")
-    
+
     db.delete(db_account)
     db.commit()
     return {"message": "Account deleted successfully"}
+
+# Activity Tracking / Billing endpoints
+@app.put("/api/accounts/{account_id}/activity-thresholds")
+async def update_account_activity_thresholds(
+    account_id: int,
+    warning_threshold: Optional[int] = None,
+    snooze_threshold: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update activity tracking thresholds for an account"""
+    account = db.query(VideoAccount).filter(VideoAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if warning_threshold is not None:
+        account.activity_threshold_warning = warning_threshold
+    if snooze_threshold is not None:
+        account.activity_snooze_threshold = snooze_threshold
+
+    db.commit()
+    db.refresh(account)
+
+    return {
+        "message": "Activity thresholds updated",
+        "activity_threshold_warning": account.activity_threshold_warning,
+        "activity_snooze_threshold": account.activity_snooze_threshold
+    }
+
+@app.put("/api/cameras/{camera_id}/activity-thresholds")
+async def update_camera_activity_thresholds(
+    camera_id: int,
+    warning_threshold: Optional[int] = None,
+    snooze_threshold: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update activity tracking thresholds for a camera (overrides account settings)"""
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    if warning_threshold is not None:
+        camera.activity_threshold_warning = warning_threshold
+    if snooze_threshold is not None:
+        camera.activity_snooze_threshold = snooze_threshold
+
+    db.commit()
+    db.refresh(camera)
+
+    return {
+        "message": "Camera activity thresholds updated",
+        "activity_threshold_warning": camera.activity_threshold_warning,
+        "activity_snooze_threshold": camera.activity_snooze_threshold
+    }
+
+@app.post("/api/accounts/{account_id}/unsnooze-activity")
+async def unsnooze_account_activity(
+    account_id: int,
+    new_warning_threshold: int,
+    new_snooze_threshold: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Unsnooze an account that was auto-snoozed due to activity threshold"""
+    from activity_tracking_service import ActivityTrackingService
+
+    try:
+        service = ActivityTrackingService(db)
+        service.manual_unsnooze_account(
+            account_id=account_id,
+            new_warning_threshold=new_warning_threshold,
+            new_snooze_threshold=new_snooze_threshold
+        )
+        return {"message": "Account unsnoozed successfully with new thresholds"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error unsnoozing account: {str(e)}")
+
+@app.post("/api/cameras/{camera_id}/unsnooze-activity")
+async def unsnooze_camera_activity(
+    camera_id: int,
+    new_warning_threshold: Optional[int] = None,
+    new_snooze_threshold: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Unsnooze a camera that was auto-snoozed due to activity threshold"""
+    from activity_tracking_service import ActivityTrackingService
+
+    try:
+        service = ActivityTrackingService(db)
+        service.manual_unsnooze_camera(
+            camera_id=camera_id,
+            new_warning_threshold=new_warning_threshold,
+            new_snooze_threshold=new_snooze_threshold
+        )
+        return {"message": "Camera unsnoozed successfully with new thresholds"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error unsnoozing camera: {str(e)}")
+
+@app.get("/api/accounts/{account_id}/activity-stats")
+async def get_account_activity_stats(
+    account_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get activity tracking statistics for an account"""
+    account = db.query(VideoAccount).filter(VideoAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    return {
+        "account_id": account.id,
+        "account_name": account.name,
+        "monthly_event_count": account.monthly_event_count or 0,
+        "activity_threshold_warning": account.activity_threshold_warning,
+        "activity_snooze_threshold": account.activity_snooze_threshold,
+        "activity_last_warning_sent_at": account.activity_last_warning_sent_at.isoformat() if account.activity_last_warning_sent_at else None,
+        "activity_auto_snoozed_at": account.activity_auto_snoozed_at.isoformat() if account.activity_auto_snoozed_at else None,
+        "activity_billing_period_start": account.activity_billing_period_start.isoformat() if account.activity_billing_period_start else None,
+        "is_auto_snoozed": account.activity_auto_snoozed_at is not None,
+        "snoozed_until": account.snoozed_until.isoformat() if account.snoozed_until else None
+    }
+
+@app.get("/api/cameras/{camera_id}/activity-stats")
+async def get_camera_activity_stats(
+    camera_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get activity tracking statistics for a camera"""
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    account = db.query(VideoAccount).filter(VideoAccount.id == camera.account_id).first()
+
+    return {
+        "camera_id": camera.id,
+        "camera_name": camera.name,
+        "account_id": camera.account_id,
+        "monthly_event_count": camera.monthly_event_count or 0,
+        "activity_threshold_warning": camera.activity_threshold_warning,
+        "activity_snooze_threshold": camera.activity_snooze_threshold,
+        "activity_last_warning_sent_at": camera.activity_last_warning_sent_at.isoformat() if camera.activity_last_warning_sent_at else None,
+        "activity_auto_snoozed_at": camera.activity_auto_snoozed_at.isoformat() if camera.activity_auto_snoozed_at else None,
+        "is_auto_snoozed": camera.activity_auto_snoozed_at is not None,
+        "snoozed_until": camera.snoozed_until.isoformat() if camera.snoozed_until else None,
+        "account_monthly_event_count": account.monthly_event_count or 0 if account else 0,
+        "account_activity_threshold_warning": account.activity_threshold_warning if account else None,
+        "account_activity_snooze_threshold": account.activity_snooze_threshold if account else None
+    }
 
 # Camera endpoints
 @app.post("/api/cameras", response_model=CameraResponse)

@@ -57,7 +57,7 @@ export default function AlarmHistoryView() {
             setAccount(accountResponse.data)
 
             // Load all cameras for this account
-            const accountCamerasResponse = await api.get(`/accounts/${cameraData.account_id}/cameras`)
+            const accountCamerasResponse = await api.get(`/api/cameras/account/${cameraData.account_id}`)
             setAllCameras(accountCamerasResponse.data)
           }
         }

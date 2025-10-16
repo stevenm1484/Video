@@ -233,7 +233,8 @@ class AlarmEvent(Base):
     id = Column(Integer, primary_key=True, index=True)
     camera_id = Column(Integer, ForeignKey("cameras.id"))
     timestamp = Column(DateTime, default=datetime.utcnow)  # When event was received from camera
-    media_type = Column(String)  # image, video, call (for phone-triggered events)
+    media_type = Column(String)  # image, video, call (for phone-triggered events), alert (for vital signs)
+    alert_type = Column(String, nullable=True)  # connectivity, image_change (only set when media_type = "alert")
     media_paths = Column(JSON)  # List of file paths
     status = Column(String, default="pending")  # pending, dismissed, alarm_generated, escalated, on_hold
 

@@ -29,7 +29,7 @@ from schemas import (
     CameraCreate, CameraUpdate, CameraResponse,
     AlarmEventResponse, AlarmCreate, AlarmUpdate, AlarmResponse,
     TwoFactorSetupRequest, TwoFactorSetupResponse, TwoFactorVerifyRequest, IPWhitelistUpdate,
-    SnoozeRequest, SnoozeResponse,
+    SnoozeRequest, SnoozeResponse, AuditLogCreate,
     EscalateRequest,
     VitalSignsCheckResponse, VitalSignsStatusResponse, VitalSignsSettingsUpdate,
     ToolCreate, ToolUpdate, ToolResponse,
@@ -88,7 +88,7 @@ app.add_middleware(
 # Security
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -595,6 +595,15 @@ async def poll_and_update_parking_slot(event_id: int, call_uniqueid: str):
                     "parked_slot": found_slot
                 })
                 logger.info(f"Updated event {event_id} with parking slot {found_slot}")
+
+                # Schedule recording retrieval with parking slot (for better matching)
+                logger.info(f"Scheduled recording retrieval for event {event_id}")
+                asyncio.create_task(retrieve_call_recording(
+                    event_id,
+                    call_uniqueid,
+                    event.timestamp,
+                    parking_slot=found_slot
+                ))
             else:
                 logger.error(f"Event {event_id} not found when updating parking slot")
         else:
@@ -704,10 +713,17 @@ async def capture_call_event_video(event_id: int, camera_id: int):
     finally:
         db.close()
 
-async def retrieve_call_recording(event_id: int, uniqueid: str, call_timestamp: datetime):
+async def retrieve_call_recording(event_id: int, uniqueid: str, call_timestamp: datetime, tracking_id: str = None, parking_slot: str = None):
     """
     Background task to retrieve call recording from PBX
     Waits for recording to be available, downloads it, and adds to event media
+
+    Args:
+        event_id: The alarm event ID
+        uniqueid: The JsSIP Call-ID
+        call_timestamp: When the call was initiated
+        tracking_id: VM tracking ID (e.g., VM-242-484-1760640000000) if available
+        parking_slot: Parking slot number (e.g., "71") for parked calls
     """
     from recording_retrieval import RecordingRetrieval
     from database import SessionLocal
@@ -715,15 +731,15 @@ async def retrieve_call_recording(event_id: int, uniqueid: str, call_timestamp: 
     db = SessionLocal()
 
     try:
-        logger.info(f"Starting call recording retrieval for event {event_id}, uniqueid: {uniqueid}")
+        logger.info(f"Starting call recording retrieval for event {event_id}, uniqueid: {uniqueid}, tracking_id: {tracking_id}, parking_slot: {parking_slot}")
 
         # Initialize recording retrieval
         retrieval = RecordingRetrieval()
 
         # Wait up to 60 seconds for recording to be available and download it
         # Recordings may take 10-30 seconds to appear after call ends
-        # If uniqueid doesn't match (due to parking), falls back to timestamp search
-        local_path = await retrieval.retrieve_and_download(uniqueid, call_timestamp, max_wait=60)
+        # Tries tracking ID first, then parking slot, then uniqueid
+        local_path = await retrieval.retrieve_and_download(uniqueid, call_timestamp, max_wait=60, tracking_id=tracking_id, parking_slot=parking_slot)
 
         if not local_path:
             logger.warning(f"Could not retrieve recording for event {event_id}")
@@ -933,7 +949,7 @@ async def inbound_call_webhook(request: Request, db: Session = Depends(get_db)):
             logger.info(f"Starting background task to retrieve call recording for event {db_event.id}")
             asyncio.create_task(retrieve_call_recording(db_event.id, call_uniqueid, db_event.timestamp))
 
-        # Broadcast event to WebSocket clients
+        # Broadcast event to WebSocket clients with account_id at root level for filtering
         try:
             # Fetch full event data with relationships
             event_data = db.query(AlarmEvent).filter(AlarmEvent.id == db_event.id).first()
@@ -943,7 +959,7 @@ async def inbound_call_webhook(request: Request, db: Session = Depends(get_db)):
                 "id": event_data.id,
                 "camera_id": event_data.camera_id,
                 "camera_name": camera.name,
-                "account_id": account.account_id if account else None,
+                "account_id": account.id if account else None,  # Use account.id not account.account_id
                 "account_name": account.name if account else None,
                 "timestamp": event_data.timestamp.isoformat() if event_data.timestamp else None,
                 "media_type": event_data.media_type,
@@ -954,10 +970,23 @@ async def inbound_call_webhook(request: Request, db: Session = Depends(get_db)):
                 "caller_id_name": event_data.caller_id_name,
                 "parked_slot": event_data.parked_slot,
                 "call_status": event_data.call_status,
+                "camera": {
+                    "id": camera.id,
+                    "name": camera.name,
+                    "location": camera.location,
+                    "account_id": account.id if account else None
+                }
             }
 
             await manager.broadcast({
                 "type": "new_event",
+                "event_id": event_data.id,
+                "camera_id": event_data.camera_id,
+                "camera_name": camera.name,
+                "account_id": account.id if account else None,  # Add account_id at root level for filtering
+                "timestamp": event_data.timestamp.isoformat() if event_data.timestamp else None,
+                "media_paths": event_data.media_paths if isinstance(event_data.media_paths, list) else [],
+                "media_type": event_data.media_type,
                 "event": event_dict
             })
             logger.info(f"Broadcasted call event {db_event.id} via WebSocket")
@@ -1115,6 +1144,29 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
         username=user.username,
         ip_address=client_ip,
         details={"auth_method": "password_only"}
+    )
+
+    return {"access_token": access_token, "token_type": "bearer", "requires_2fa": False}
+
+@app.post("/api/token/refresh", response_model=Token)
+async def refresh_token(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """
+    Refresh the access token for an authenticated user.
+    This allows users to extend their session without re-entering credentials.
+    """
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": current_user.username}, expires_delta=access_token_expires
+    )
+
+    # Log token refresh activity
+    from audit_helper import log_user_activity
+    log_user_activity(
+        db=db,
+        action="token_refresh",
+        user_id=current_user.id,
+        username=current_user.username,
+        details={"method": "token_refresh"}
     )
 
     return {"access_token": access_token, "token_type": "bearer", "requires_2fa": False}
@@ -2485,7 +2537,7 @@ async def create_camera(
 
     # Generate unique SMTP email for camera
     import uuid
-    smtp_email = f"camera-{uuid.uuid4().hex[:8]}@video.statewidecentralstation.com"
+    smtp_email = f"camera-{uuid.uuid4().hex[:8]}@scutumvideo.com"
 
     db_camera = Camera(**camera_data, smtp_email=smtp_email)
     db.add(db_camera)
@@ -2904,6 +2956,27 @@ async def stop_capture_for_event(
     else:
         logger.error(f"Capture file missing or empty: {output_path}")
         raise HTTPException(status_code=500, detail="Capture file missing or empty")
+
+@app.get("/api/events/{event_id}/capture-status")
+async def get_capture_status(
+    event_id: int,
+    camera_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Check if a capture is currently active for this event/camera combination"""
+    capture_key = (event_id, camera_id)
+
+    if capture_key in active_captures:
+        process, start_time, output_path, user_id = active_captures[capture_key]
+        return {
+            "is_active": True,
+            "started_at": start_time.isoformat(),
+            "duration_seconds": int((datetime.now() - start_time).total_seconds())
+        }
+    else:
+        return {
+            "is_active": False
+        }
 
 # Snooze endpoints
 @app.post("/api/cameras/{camera_id}/snooze", response_model=SnoozeResponse)
@@ -4464,6 +4537,7 @@ async def get_alarm_account_events(
 async def update_alarm(
     alarm_id: int,
     alarm_update: AlarmUpdate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -4478,6 +4552,42 @@ async def update_alarm(
     if alarm_update.resolution is not None:
         alarm.resolution = alarm_update.resolution
     if alarm_update.call_logs is not None:
+        # Check if any new call logs have call_uniqueid and trigger recording retrieval
+        old_call_logs = alarm.call_logs if alarm.call_logs else []
+        new_call_logs = alarm_update.call_logs
+
+        # Find newly added call logs with call_uniqueid
+        for call_log in new_call_logs:
+            # Check if this is a new call log (not in old_call_logs)
+            is_new = True
+            for old_log in old_call_logs:
+                if (old_log.get('contact_phone') == call_log.get('contact_phone') and
+                    old_log.get('call_start') == call_log.get('call_start')):
+                    is_new = False
+                    break
+
+            # If it's a new call with a uniqueid, trigger recording retrieval
+            if is_new and call_log.get('call_uniqueid'):
+                tracking_id = call_log.get('call_tracking_id')
+                logger.info(f"Triggering recording retrieval for call_uniqueid: {call_log.get('call_uniqueid')}, tracking_id: {tracking_id}")
+
+                # Parse call_start timestamp
+                from dateutil import parser as date_parser
+                try:
+                    call_timestamp = date_parser.parse(call_log.get('call_start'))
+
+                    # Trigger background task to retrieve recording
+                    background_tasks.add_task(
+                        retrieve_call_recording,
+                        alarm.event_id,
+                        call_log.get('call_uniqueid'),
+                        call_timestamp,
+                        tracking_id
+                    )
+                    logger.info(f"Scheduled recording retrieval for event {alarm.event_id}")
+                except Exception as e:
+                    logger.error(f"Error scheduling recording retrieval: {e}")
+
         alarm.call_logs = alarm_update.call_logs
     if alarm_update.action_plan_state is not None:
         alarm.action_plan_state = alarm_update.action_plan_state
@@ -4485,6 +4595,76 @@ async def update_alarm(
     db.commit()
     db.refresh(alarm)
     return alarm
+
+@app.post("/api/alarms/{alarm_id}/call-log")
+async def add_call_log(
+    alarm_id: int,
+    call_log: dict,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Add a call log entry to an alarm and trigger recording retrieval
+    Used for both contact calls and camera calls
+    """
+    alarm = db.query(Alarm).filter(Alarm.id == alarm_id).first()
+    if not alarm:
+        raise HTTPException(status_code=404, detail="Alarm not found")
+
+    # Initialize call_logs if None
+    if alarm.call_logs is None:
+        alarm.call_logs = []
+
+    # Check if this is a new call (by uniqueid) or updating existing
+    call_uniqueid = call_log.get('call_uniqueid')
+    is_new = True
+
+    if call_uniqueid and alarm.call_logs:
+        for i, existing_call in enumerate(alarm.call_logs):
+            if existing_call.get('call_uniqueid') == call_uniqueid:
+                # Update existing call log
+                alarm.call_logs[i] = call_log
+                is_new = False
+                break
+
+    if is_new:
+        # Append new call log
+        alarm.call_logs.append(call_log)
+
+    # Mark as modified for JSONB column
+    flag_modified(alarm, "call_logs")
+    db.commit()
+
+    # Only retrieve recordings for calls that actually connected and have duration > 0
+    # Failed calls (no answer, hung up before connecting) don't have valid recordings
+    call_duration = call_log.get('duration', 0)
+    call_resolution = call_log.get('resolution', '')
+
+    # If it's a new call with a uniqueid AND the call actually connected, trigger recording retrieval
+    if is_new and call_log.get('call_uniqueid') and call_duration > 0 and call_resolution != 'no_answer':
+        tracking_id = call_log.get('call_tracking_id')
+        logger.info(f"Triggering recording retrieval for call_uniqueid: {call_log.get('call_uniqueid')}, tracking_id: {tracking_id}, duration: {call_duration}s")
+
+        # Parse call_start timestamp
+        from dateutil import parser as date_parser
+        try:
+            call_timestamp = date_parser.parse(call_log.get('call_start'))
+
+            # Trigger background task to retrieve recording
+            background_tasks.add_task(
+                retrieve_call_recording,
+                alarm.event_id,
+                call_log.get('call_uniqueid'),
+                call_timestamp,
+                tracking_id  # Pass tracking_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to parse call timestamp or trigger recording retrieval: {e}")
+    elif is_new and call_log.get('call_uniqueid'):
+        logger.info(f"Skipping recording retrieval for failed call (duration: {call_duration}s, resolution: {call_resolution})")
+
+    return {"success": True, "call_logs": alarm.call_logs}
 
 @app.put("/api/alarms/{alarm_id}/resolve")
 async def resolve_alarm(
@@ -4764,8 +4944,8 @@ async def retrieve_call_recording_for_alarm(
             logger.error(f"Failed to download recording from {remote_path}")
             raise HTTPException(status_code=500, detail="Failed to download recording")
 
-        # Update call log with recording URL
-        call_log["recording_url"] = f"/api/media/{local_path}"
+        # Update call log with recording URL (served directly by nginx)
+        call_log["recording_url"] = f"/{local_path}"
         alarm.call_logs = call_logs
         flag_modified(alarm, "call_logs")
         db.commit()
@@ -4774,7 +4954,7 @@ async def retrieve_call_recording_for_alarm(
 
         return {
             "message": "Recording retrieved successfully",
-            "recording_url": f"/api/media/{local_path}"
+            "recording_url": f"/{local_path}"
         }
 
     except Exception as e:
@@ -6556,10 +6736,7 @@ async def hangup_pbx_call(
 
 @app.post("/api/audit-log")
 async def create_audit_log(
-    action: str,
-    alarm_id: Optional[int] = None,
-    event_id: Optional[int] = None,
-    details: Optional[dict] = None,
+    log_data: AuditLogCreate,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -6569,12 +6746,12 @@ async def create_audit_log(
     """
     try:
         audit_log = AlarmAuditLog(
-            action=action,
-            alarm_id=alarm_id,
-            event_id=event_id,
+            action=log_data.action,
+            alarm_id=log_data.alarm_id,
+            event_id=log_data.event_id,
             user_id=current_user.id,
             username=current_user.username,
-            details=details,
+            details=log_data.details,
             timestamp=datetime.utcnow()
         )
 
@@ -6582,7 +6759,7 @@ async def create_audit_log(
         db.commit()
         db.refresh(audit_log)
 
-        logger.info(f"Audit log created: {action} by {current_user.username} for alarm {alarm_id}")
+        logger.info(f"Audit log created: {log_data.action} by {current_user.username} for alarm {log_data.alarm_id}")
 
         return {
             "success": True,
@@ -6675,6 +6852,11 @@ async def get_alarm_timeline(
         first_view_session_id = None
         seen_alarm_viewed = False
 
+        # Track action plan steps to only show final state
+        # Key: step_id, Value: most recent log entry
+        action_plan_steps = {}
+        action_plan_questions = {}
+
         for log in audit_logs:
             # Special handling for "alarm_viewed" - only show the FIRST one
             if log.action == 'alarm_viewed':
@@ -6698,6 +6880,20 @@ async def get_alarm_timeline(
             elif log.action == 'event_dismissed' and log.details and log.details.get('via_alarm_resolution'):
                 # Skip auto-dismissals from alarm resolution - redundant with final_resolution card
                 continue
+            elif log.action == 'action_plan_step_toggled':
+                # Track step toggles - only show final state
+                step_id = log.details.get('step_id') if log.details else None
+                if step_id:
+                    action_plan_steps[step_id] = log
+                # Will add to timeline after loop
+                continue
+            elif log.action == 'action_plan_question_answered':
+                # Track question answers - only show final answer
+                step_id = log.details.get('step_id') if log.details else None
+                if step_id:
+                    action_plan_questions[step_id] = log
+                # Will add to timeline after loop
+                continue
             else:
                 # For all other actions (calls, tools, escalation, etc.), include them
                 # These are actual actions taken on the event, not just viewing history
@@ -6709,6 +6905,28 @@ async def get_alarm_timeline(
                     "details": log.details or {}
                 })
 
+        # Add final state of action plan steps (only checked items)
+        for step_id, log in action_plan_steps.items():
+            # Only show checked items
+            if log.details and log.details.get('action') == 'checked':
+                timeline_items.append({
+                    "id": f"audit_{log.id}",
+                    "timestamp": log.timestamp.isoformat(),
+                    "action": log.action,
+                    "username": log.username,
+                    "details": log.details or {}
+                })
+
+        # Add final answers to action plan questions
+        for step_id, log in action_plan_questions.items():
+            timeline_items.append({
+                "id": f"audit_{log.id}",
+                "timestamp": log.timestamp.isoformat(),
+                "action": log.action,
+                "username": log.username,
+                "details": log.details or {}
+            })
+
         # 3. Add call logs from alarm.call_logs JSON field
         # Group call as single item: initiated (main) with outcome/notes as nested details
         if alarm.call_logs:
@@ -6717,6 +6935,18 @@ async def get_alarm_timeline(
                 if call_start:
                     outcome = call_log.get("resolution") or call_log.get("outcome")
                     call_end = call_log.get("call_end") or call_log.get("end_time")
+
+                    # Check if there's a recording in the event's media_paths for this call
+                    recording_url = call_log.get("recording_url")
+                    if not recording_url and event and event.media_paths:
+                        # Look for call recording files (contain "call_recording" in the name)
+                        for media_path in event.media_paths:
+                            if isinstance(media_path, str) and "call_recording" in media_path:
+                                # Check if this recording matches the call timestamp
+                                # For now, associate any call recording with the call
+                                # In future, could match by uniqueid in filename
+                                recording_url = f"/{media_path}"
+                                break
 
                     # Create single call entry with outcome/notes as nested details
                     timeline_items.append({
@@ -6729,7 +6959,7 @@ async def get_alarm_timeline(
                             "phone_number": call_log.get("contact_phone") or call_log.get("phone"),
                             "outcome": outcome,
                             "duration": call_log.get("duration"),
-                            "recording_url": call_log.get("recording_url"),
+                            "recording_url": recording_url,
                             "notes": call_log.get("notes"),
                             "call_type": call_log.get("type", "manual"),
                             "call_end": call_end
@@ -6766,20 +6996,20 @@ async def get_alarm_timeline(
                     }
                 })
 
-            # Check for voice recording in media_paths
-            if event.media_paths:
-                for media_path in event.media_paths:
-                    if isinstance(media_path, str) and ('.wav' in media_path or '.mp3' in media_path or 'recordings' in media_path):
-                        timeline_items.append({
-                            "id": f"recording_{event.id}",
-                            "timestamp": event.timestamp.isoformat() if event.timestamp else None,
-                            "action": "recording_available",
-                            "username": None,
-                            "details": {
-                                "recording_url": f"/api/media/{media_path}",
-                                "unique_id": event.call_uniqueid
-                            }
-                        })
+        # 5. Check for voice recordings in media_paths (for all event types)
+        if event and event.media_paths:
+            for media_path in event.media_paths:
+                if isinstance(media_path, str) and ('.wav' in media_path or '.mp3' in media_path or 'recordings' in media_path):
+                    timeline_items.append({
+                        "id": f"recording_{event.id}",
+                        "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                        "action": "recording_available",
+                        "username": None,
+                        "details": {
+                            "recording_url": f"/{media_path}",  # Served directly by nginx from /uploads/
+                            "unique_id": event.call_uniqueid if event.media_type == 'call' else None
+                        }
+                    })
 
         # Notes are already shown in the final resolution card, no need to add them here
 
@@ -7374,6 +7604,7 @@ async def trigger_tool(
     state: int = None,
     alarm_id: int = None,
     event_id: int = None,
+    from_tool_group: bool = False,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
@@ -7383,13 +7614,14 @@ async def trigger_tool(
     If not provided, defaults to relay 1.
     For static mode relays, state can be 0 (OFF) or 1 (ON). If not provided, uses pulse mode behavior.
     alarm_id and event_id can be passed for audit logging when triggered from alarm detail page.
+    from_tool_group indicates this is being called from a tool group execution (skip individual audit logging).
     """
     try:
         tool = db.query(Tool).filter(Tool.id == tool_id).first()
         if not tool:
             raise HTTPException(status_code=404, detail="Tool not found")
 
-        logger.info(f"Triggering tool: {tool.name} (type: {tool.tool_type}) by user {current_user.username}")
+        logger.info(f"Triggering tool: {tool.name} (type: {tool.tool_type}) by user {current_user.username}, alarm_id={alarm_id}, event_id={event_id}")
 
         # Handle different tool types
         if tool.tool_type == "cbw_relay":
@@ -7494,8 +7726,8 @@ async def trigger_tool(
 
             logger.info(f"CBW Relay {mode_text} successfully: {tool.name} (relay {relay_num})")
 
-            # Log audit action if triggered from alarm detail
-            if event_id or alarm_id:
+            # Log audit action if triggered from alarm detail (but not from tool group - tool group logs it)
+            if (event_id or alarm_id) and not from_tool_group:
                 from audit_helper import log_audit_action
                 log_audit_action(
                     db=db,
@@ -7548,8 +7780,8 @@ async def trigger_tool(
 
             logger.info(f"Webhook triggered successfully: {tool.name}")
 
-            # Log audit action if triggered from alarm detail
-            if event_id or alarm_id:
+            # Log audit action if triggered from alarm detail (but not from tool group - tool group logs it)
+            if (event_id or alarm_id) and not from_tool_group:
                 from audit_helper import log_audit_action
                 log_audit_action(
                     db=db,
@@ -7621,8 +7853,8 @@ async def trigger_tool(
 
             logger.info(f"Camera view tool triggered: {tool.name} (view_type: {view_type}, cameras: {camera_ids})")
 
-            # Log audit action if triggered from alarm detail
-            if event_id or alarm_id:
+            # Log audit action if triggered from alarm detail (but not from tool group - tool group logs it)
+            if (event_id or alarm_id) and not from_tool_group:
                 from audit_helper import log_audit_action
                 log_audit_action(
                     db=db,
@@ -7961,6 +8193,47 @@ async def execute_tool_group(
                     results.append(result)
 
         logger.info(f"Tool group executed successfully: {tool_group.name}")
+
+        # Log audit action if triggered from alarm detail
+        if event_id or alarm_id:
+            from audit_helper import log_audit_action
+
+            # Extract tool names and details from results for audit log
+            tool_details = []
+            for result in results:
+                if isinstance(result, dict) and result.get("success"):
+                    tool_id = result.get("tool_id")
+                    if tool_id:
+                        tool = db.query(Tool).filter(Tool.id == tool_id).first()
+                        if tool:
+                            tool_detail = {
+                                "tool_name": tool.name,
+                                "tool_type": tool.tool_type,
+                                "action_type": result.get("action")
+                            }
+
+                            # Add relay-specific details
+                            if result.get("relay_number"):
+                                tool_detail["relay_number"] = result.get("relay_number")
+
+                            tool_details.append(tool_detail)
+
+            log_audit_action(
+                db=db,
+                action="tool_group_triggered",
+                user_id=current_user.id,
+                username=current_user.username,
+                event_id=event_id,
+                alarm_id=alarm_id,
+                details={
+                    "tool_group_name": tool_group.name,
+                    "tool_group_id": tool_group_id,
+                    "tool_count": len(tool_details),
+                    "tools": tool_details,
+                    "execution_results": results
+                }
+            )
+
         return {
             "success": True,
             "message": f"Tool group '{tool_group.name}' executed",
@@ -8018,7 +8291,7 @@ async def execute_single_action(action: dict, db: Session, current_user: User, a
 
         # Trigger the relay WITHOUT waiting for pulse completion
         # Fire and forget - we'll let the relay handle its own pulse timing
-        asyncio.create_task(trigger_tool_async(tool_id, relay_number, state, current_user, db, alarm_id, event_id))
+        asyncio.create_task(trigger_tool_async(tool_id, relay_number, state, current_user, db, alarm_id, event_id, True))
 
         # If duration is specified, wait before allowing next action
         # Duration is ONLY additional wait time, not replacement for pulse wait
@@ -8036,7 +8309,7 @@ async def execute_single_action(action: dict, db: Session, current_user: User, a
     elif tool.tool_type == "camera_view" or action_type == "camera_view":
         # Camera view tools MUST return their config to the frontend
         # So we need to await the result, but still allow rapid triggering
-        result = await trigger_tool(tool_id, None, None, alarm_id, event_id, current_user, db)
+        result = await trigger_tool(tool_id, None, None, alarm_id, event_id, True, current_user, db)
 
         # If duration is specified, wait before allowing next action
         if duration:
@@ -8046,7 +8319,7 @@ async def execute_single_action(action: dict, db: Session, current_user: User, a
 
     elif tool.tool_type == "webhook" or action_type == "webhook":
         # Trigger webhook asynchronously
-        asyncio.create_task(trigger_tool_async(tool_id, None, None, current_user, db, alarm_id, event_id))
+        asyncio.create_task(trigger_tool_async(tool_id, None, None, current_user, db, alarm_id, event_id, True))
 
         # Webhooks typically don't need duration wait, but support it if specified
         if duration:
@@ -8062,15 +8335,16 @@ async def execute_single_action(action: dict, db: Session, current_user: User, a
     else:
         raise ValueError(f"Unsupported action type: {action_type}")
 
-async def trigger_tool_async(tool_id: int, relay_number: int, state: int, current_user: User, db: Session, alarm_id: int = None, event_id: int = None):
+async def trigger_tool_async(tool_id: int, relay_number: int, state: int, current_user: User, db: Session, alarm_id: int = None, event_id: int = None, from_tool_group: bool = False):
     """Async wrapper for triggering tools without blocking
 
     This allows tools to be fired rapidly in sequence without waiting for each to complete.
     Any errors are logged but don't block other tools from executing.
     alarm_id and event_id are passed for audit logging when triggered from alarm detail page.
+    from_tool_group indicates this is being called from a tool group execution (skip individual audit logging).
     """
     try:
-        await trigger_tool(tool_id, relay_number, state, alarm_id, event_id, current_user, db)
+        await trigger_tool(tool_id, relay_number, state, alarm_id, event_id, from_tool_group, current_user, db)
     except Exception as e:
         logger.error(f"Async tool trigger failed for tool {tool_id}: {e}")
 

@@ -600,6 +600,10 @@ function ActiveEventCard({ group, currentUser, onReload }) {
   const [streamLoading, setStreamLoading] = useState(false)
   const [showEscalateModal, setShowEscalateModal] = useState(false)
   const [escalateNotes, setEscalateNotes] = useState('')
+  const [showHoldModal, setShowHoldModal] = useState(false)
+  const [holdNotes, setHoldNotes] = useState('')
+  const [showEyesOnOverrideModal, setShowEyesOnOverrideModal] = useState(false)
+  const [eyesOnOverrideData, setEyesOnOverrideData] = useState(null)
   const videoRef = React.useRef(null)
   const hlsRef = React.useRef(null)
 
@@ -618,9 +622,14 @@ function ActiveEventCard({ group, currentUser, onReload }) {
 
       return () => {
         clearTimeout(timer)
+        // Cleanup HLS when unmounting or changing camera
         if (hlsRef.current) {
           hlsRef.current.destroy()
           hlsRef.current = null
+        }
+        // Stop capture when component unmounts
+        if (selectedEvent && selectedEvent.id && selectedEvent.camera_id) {
+          stopCapture(selectedEvent.id, selectedEvent.camera_id)
         }
       }
     }
@@ -631,8 +640,39 @@ function ActiveEventCard({ group, currentUser, onReload }) {
         hlsRef.current.destroy()
         hlsRef.current = null
       }
+      if (selectedEvent && selectedEvent.id && selectedEvent.camera_id) {
+        stopCapture(selectedEvent.id, selectedEvent.camera_id)
+      }
     }
   }, [selectedEvent?.camera_id])
+
+  const stopCapture = async (eventId, cameraId) => {
+    try {
+      await api.post(`/events/${eventId}/stop-capture`, null, {
+        params: { camera_id: cameraId }
+      })
+      console.log(`[Monitoring] Stopped capture for event ${eventId}, camera ${cameraId}`)
+    } catch (err) {
+      // Ignore errors - might not be capturing
+      console.log(`[Monitoring] Stop capture failed (may not have been capturing):`, err.message)
+    }
+  }
+
+  const startCapture = async (eventId, cameraId) => {
+    try {
+      await api.post(`/events/${eventId}/start-capture`, null, {
+        params: { camera_id: cameraId }
+      })
+      console.log(`[Monitoring] Started capture for event ${eventId}, camera ${cameraId}`)
+    } catch (err) {
+      // Already capturing is OK
+      if (err.response?.status === 200 || err.response?.data?.message?.includes('already')) {
+        console.log(`[Monitoring] Capture already in progress for event ${eventId}, camera ${cameraId}`)
+      } else {
+        console.error('[Monitoring] Failed to start capture:', err)
+      }
+    }
+  }
 
   const startLiveStream = async (cameraId) => {
     console.log('[LiveStream] Starting stream for camera ID:', cameraId)
@@ -667,19 +707,12 @@ function ActiveEventCard({ group, currentUser, onReload }) {
           console.log('[LiveStream] Video is now playing')
           setStreamLoading(false)
 
-          // Start capturing after stream is confirmed playing (5 second delay to ensure RTSP is stable)
+          // Start capturing after stream is confirmed playing (1 second delay to ensure RTSP is stable)
           setTimeout(() => {
             if (selectedEvent && selectedEvent.id) {
-              console.log(`[Monitoring] Starting capture for event ${selectedEvent.id}, camera ${cameraId}`)
-              api.post(`/events/${selectedEvent.id}/start-capture`, null, {
-                params: {
-                  camera_id: cameraId
-                }
-              }).catch(err => {
-                console.error('[Monitoring] Failed to start capture:', err)
-              })
+              startCapture(selectedEvent.id, cameraId)
             }
-          }, 5000)
+          }, 1000)
         }, { once: true })
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
@@ -705,19 +738,12 @@ function ActiveEventCard({ group, currentUser, onReload }) {
           console.log('[LiveStream] Video is now playing')
           setStreamLoading(false)
 
-          // Start capturing after stream is confirmed playing (5 second delay to ensure RTSP is stable)
+          // Start capturing after stream is confirmed playing (1 second delay to ensure RTSP is stable)
           setTimeout(() => {
             if (selectedEvent && selectedEvent.id) {
-              console.log(`[Monitoring] Starting capture for event ${selectedEvent.id}, camera ${cameraId}`)
-              api.post(`/events/${selectedEvent.id}/start-capture`, null, {
-                params: {
-                  camera_id: cameraId
-                }
-              }).catch(err => {
-                console.error('[Monitoring] Failed to start capture:', err)
-              })
+              startCapture(selectedEvent.id, cameraId)
             }
-          }, 5000)
+          }, 1000)
         }, { once: true })
 
         videoRef.current.addEventListener('loadedmetadata', () => {
@@ -754,28 +780,27 @@ function ActiveEventCard({ group, currentUser, onReload }) {
     const eventNeedingOverride = group.events.find(evt => {
       const eyesOnRequired = evt.eyes_on_required || 1
       const eyesOnCurrent = evt.eyes_on_current || 0
-      return eyesOnRequired > 1 && eyesOnCurrent < eyesOnRequired
+      // Count the current user as having "eyes on" since they're about to dismiss
+      const eyesOnWithCurrentUser = eyesOnCurrent + 1
+      return eyesOnRequired > 1 && eyesOnWithCurrentUser < eyesOnRequired
     })
 
     if (canOverride && eventNeedingOverride) {
       const eyesOnRequired = eventNeedingOverride.eyes_on_required || 1
       const eyesOnCurrent = eventNeedingOverride.eyes_on_current || 0
-      const confirmed = window.confirm(
-        `This account has ${eyesOnRequired} eyes on requirement, but only ${eyesOnCurrent} have reviewed it. Do you want to override this?\n\nClicking Yes will dismiss all events.`
-      )
-      if (!confirmed) return
+      const eyesOnWithCurrentUser = eyesOnCurrent + 1
+      // Show custom modal instead of window.confirm
+      setEyesOnOverrideData({ eyesOnRequired, eyesOnCurrent: eyesOnWithCurrentUser })
+      setShowEyesOnOverrideModal(true)
+      return
     }
 
-    try {
-      // Stop capture before dismissing
-      if (selectedEvent && selectedEvent.camera_id) {
-        await api.post(`/events/${selectedEvent.id}/stop-capture`, null, {
-          params: {
-            camera_id: selectedEvent.camera_id
-          }
-        }).catch(err => console.error('Failed to stop capture:', err))
-      }
+    // Proceed with dismiss if no override needed
+    await performDismissAll()
+  }
 
+  const performDismissAll = async () => {
+    try {
       for (const event of group.events) {
         if (event.type === 'alarm' && event.alarm_id) {
           await api.put(`/alarms/${event.alarm_id}/resolve`, {
@@ -797,6 +822,17 @@ function ActiveEventCard({ group, currentUser, onReload }) {
         toast.error('Failed to dismiss events')
       }
     }
+  }
+
+  const handleConfirmEyesOnOverride = async () => {
+    setShowEyesOnOverrideModal(false)
+    setEyesOnOverrideData(null)
+    await performDismissAll()
+  }
+
+  const handleCancelEyesOnOverride = () => {
+    setShowEyesOnOverrideModal(false)
+    setEyesOnOverrideData(null)
   }
 
   const handleGenerateAlarm = async () => {
@@ -834,15 +870,6 @@ function ActiveEventCard({ group, currentUser, onReload }) {
 
   const handleConfirmEscalate = async () => {
     try {
-      // Stop capture before escalating
-      if (selectedEvent && selectedEvent.camera_id) {
-        await api.post(`/events/${selectedEvent.id}/stop-capture`, null, {
-          params: {
-            camera_id: selectedEvent.camera_id
-          }
-        }).catch(err => console.error('Failed to stop capture:', err))
-      }
-
       const notesToSend = escalateNotes.trim() || undefined
       await api.put(`/events/${selectedEvent.id}/escalate`, {
         notes: notesToSend
@@ -864,8 +891,32 @@ function ActiveEventCard({ group, currentUser, onReload }) {
     setEscalateNotes('')
   }
 
+  const handleHold = () => {
+    setShowHoldModal(true)
+  }
+
+  const handleConfirmHold = async () => {
+    try {
+      await api.put(`/events/${selectedEvent.id}/hold`, {
+        notes: holdNotes.trim() || undefined
+      })
+      setShowHoldModal(false)
+      setHoldNotes('')
+      onReload()
+    } catch (error) {
+      toast.error('Failed to hold event')
+    }
+  }
+
+  const handleCancelHold = () => {
+    setShowHoldModal(false)
+    setHoldNotes('')
+  }
+
   return (
     <div style={styles.activeCard}>
+      {/* Scrollable Content Wrapper */}
+      <div style={styles.activeScrollContent}>
       {/* Account Header */}
       <div style={styles.activeHeader}>
         <div style={styles.activeAccountInfo}>
@@ -995,16 +1046,46 @@ function ActiveEventCard({ group, currentUser, onReload }) {
                     />
                   )
                 ) : selectedEvent.media_type === 'alert' ? (
-                  <div style={styles.vitalSignsAlert}>
-                    <AlertCircle size={48} color="#ef4444" />
-                    <div style={styles.vitalSignsTitle}>Video Loss Detected</div>
-                    <div style={styles.vitalSignsMessage}>
-                      Camera connectivity failure
+                  selectedEvent.alert_type === 'image_change' ? (
+                    // Image Change Alert - show previous baseline image
+                    hasMedia ? (
+                      <div style={{position: 'relative'}}>
+                        <img
+                          src={`/${mediaPaths[0]}`}
+                          alt="Previous Baseline"
+                          style={styles.media}
+                        />
+                        <div style={styles.imageChangeOverlay}>
+                          <AlertCircle size={32} color="#f59e0b" />
+                          <div style={styles.imageChangeTitle}>Image Change Detected</div>
+                          <div style={styles.imageChangeSubtitle}>Showing: Previous Baseline Image</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={styles.vitalSignsAlert}>
+                        <AlertCircle size={48} color="#f59e0b" />
+                        <div style={styles.vitalSignsTitle}>Image Change Detected</div>
+                        <div style={styles.vitalSignsMessage}>
+                          Significant camera view change detected
+                        </div>
+                        <div style={styles.vitalSignsTimestamp}>
+                          Detected at: {formatTimestampInTimezone(selectedEvent.timestamp, group.account_timezone, { showTimezone: true })}
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    // Connectivity Alert
+                    <div style={styles.vitalSignsAlert}>
+                      <AlertCircle size={48} color="#ef4444" />
+                      <div style={styles.vitalSignsTitle}>Video Loss Detected</div>
+                      <div style={styles.vitalSignsMessage}>
+                        Camera connectivity failure
+                      </div>
+                      <div style={styles.vitalSignsTimestamp}>
+                        Last detected: {formatTimestampInTimezone(selectedEvent.timestamp, group.account_timezone, { showTimezone: true })}
+                      </div>
                     </div>
-                    <div style={styles.vitalSignsTimestamp}>
-                      Last detected: {formatTimestampInTimezone(selectedEvent.timestamp, group.account_timezone, { showTimezone: true })}
-                    </div>
-                  </div>
+                  )
                 ) : (
                   <div style={styles.noStream}>No media available</div>
                 )}
@@ -1042,6 +1123,8 @@ function ActiveEventCard({ group, currentUser, onReload }) {
           <QuickToolsTrigger accountId={group.account_id} />
         </>
       )}
+      </div>
+      {/* End Scrollable Content Wrapper */}
 
       {/* Actions */}
       {selectedEvent && (
@@ -1049,7 +1132,7 @@ function ActiveEventCard({ group, currentUser, onReload }) {
           {selectedEvent.eyes_on_required > 1 && (
             <button style={styles.eyesOnBtn} title={`Eyes On: ${selectedEvent.eyes_on_current || 0}/${selectedEvent.eyes_on_required}`}>
               <Users size={18} />
-              <span>Eyes On</span>
+              <span>{selectedEvent.eyes_on_current || 0}/{selectedEvent.eyes_on_required}</span>
             </button>
           )}
           <SnoozeButton
@@ -1060,6 +1143,10 @@ function ActiveEventCard({ group, currentUser, onReload }) {
             buttonStyle={{ flex: 1, padding: '0.75rem' }}
             showLabel={true}
           />
+          <button style={styles.holdBtn} onClick={handleHold} title="Hold Event">
+            <Clock size={18} />
+            <span>Hold</span>
+          </button>
           {/* Only show dismiss button if allow_dismiss is true (or undefined/null for backward compatibility) */}
           {group.allow_dismiss !== false && (
             <button
@@ -1121,6 +1208,82 @@ function ActiveEventCard({ group, currentUser, onReload }) {
           </div>
         </div>
       )}
+
+      {/* Hold Modal */}
+      {showHoldModal && (
+        <div style={styles.modalOverlay} onClick={handleCancelHold}>
+          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Hold Event</h3>
+              <button style={styles.modalCloseBtn} onClick={handleCancelHold}>
+                <X size={20} />
+              </button>
+            </div>
+            <div style={styles.modalBody}>
+              <label style={styles.modalLabel}>Add notes for hold (optional):</label>
+              <textarea
+                style={styles.modalTextarea}
+                placeholder="Describe why this event is being held..."
+                value={holdNotes}
+                onChange={(e) => setHoldNotes(e.target.value)}
+                rows={5}
+                autoFocus
+              />
+            </div>
+            <div style={styles.modalFooter}>
+              <button style={styles.modalCancelBtn} onClick={handleCancelHold}>
+                Cancel
+              </button>
+              <button style={{...styles.modalConfirmBtn, background: '#3b82f6'}} onClick={handleConfirmHold}>
+                <Clock size={18} />
+                <span>Hold</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Eyes On Override Modal */}
+      {showEyesOnOverrideModal && eyesOnOverrideData && (
+        <div style={styles.modalOverlay} onClick={handleCancelEyesOnOverride}>
+          <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Eyes On Override</h3>
+              <button style={styles.modalCloseBtn} onClick={handleCancelEyesOnOverride}>
+                <X size={20} />
+              </button>
+            </div>
+            <div style={styles.modalBody}>
+              <div style={styles.eyesOnWarningBox}>
+                <Users size={32} color="#f59e0b" />
+                <div style={styles.eyesOnWarningText}>
+                  <p style={{margin: '0 0 0.75rem 0', fontWeight: '600', color: '#f59e0b'}}>
+                    Eyes On Requirement Not Met
+                  </p>
+                  <p style={{margin: '0 0 0.5rem 0', fontSize: '0.875rem', color: '#cbd5e1'}}>
+                    This account requires <strong>{eyesOnOverrideData.eyesOnRequired} operators</strong> to review events before dismissing.
+                  </p>
+                  <p style={{margin: '0', fontSize: '0.875rem', color: '#cbd5e1'}}>
+                    Currently only <strong>{eyesOnOverrideData.eyesOnCurrent} operator{eyesOnOverrideData.eyesOnCurrent !== 1 ? 's have' : ' has'}</strong> reviewed this event.
+                  </p>
+                </div>
+              </div>
+              <div style={styles.eyesOnConfirmText}>
+                Do you want to override this requirement and dismiss all events?
+              </div>
+            </div>
+            <div style={styles.modalFooter}>
+              <button style={styles.modalCancelBtn} onClick={handleCancelEyesOnOverride}>
+                Cancel
+              </button>
+              <button style={{...styles.modalConfirmBtn, background: '#f59e0b'}} onClick={handleConfirmEyesOnOverride}>
+                <X size={18} />
+                <span>Yes, Dismiss All</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1143,7 +1306,9 @@ const styles = {
   },
   mainContent: {
     flex: 1,
-    overflow: 'auto'
+    overflow: 'hidden',
+    display: 'flex',
+    flexDirection: 'column'
   },
   sidebar: {
     background: '#1e293b',
@@ -1370,7 +1535,17 @@ const styles = {
     borderRadius: '0.75rem',
     border: '2px solid #10b981',
     overflow: 'hidden',
-    boxShadow: '0 4px 6px -1px rgba(16, 185, 129, 0.3)'
+    boxShadow: '0 4px 6px -1px rgba(16, 185, 129, 0.3)',
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%'
+  },
+  activeScrollContent: {
+    flex: 1,
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    minHeight: 0
   },
   activeHeader: {
     padding: '1rem',
@@ -1664,6 +1839,21 @@ const styles = {
     cursor: 'pointer',
     transition: 'background 0.2s'
   },
+  holdBtn: {
+    flex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '0.5rem',
+    padding: '0.75rem',
+    background: '#3b82f6',
+    border: 'none',
+    borderRadius: '0.5rem',
+    color: '#fff',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background 0.2s'
+  },
   // Modal styles
   modalOverlay: {
     position: 'fixed',
@@ -1911,6 +2101,51 @@ const styles = {
     marginTop: '0.5rem',
     paddingTop: '0.75rem',
     borderTop: '1px solid #334155'
+  },
+  imageChangeOverlay: {
+    position: 'absolute',
+    bottom: '0',
+    left: '0',
+    right: '0',
+    background: 'linear-gradient(to top, rgba(15, 23, 42, 0.95) 0%, rgba(15, 23, 42, 0.8) 60%, transparent 100%)',
+    backdropFilter: 'blur(4px)',
+    padding: '1.5rem 1rem 1rem 1rem',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '0.5rem'
+  },
+  imageChangeTitle: {
+    fontSize: '1rem',
+    fontWeight: '700',
+    color: '#f59e0b',
+    textAlign: 'center'
+  },
+  imageChangeSubtitle: {
+    fontSize: '0.75rem',
+    color: '#94a3b8',
+    textAlign: 'center'
+  },
+  eyesOnWarningBox: {
+    display: 'flex',
+    gap: '1rem',
+    padding: '1.5rem',
+    background: 'rgba(245, 158, 11, 0.1)',
+    border: '2px solid #f59e0b',
+    borderRadius: '0.5rem',
+    marginBottom: '1rem'
+  },
+  eyesOnWarningText: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem'
+  },
+  eyesOnConfirmText: {
+    fontSize: '0.9rem',
+    color: '#e2e8f0',
+    textAlign: 'center',
+    fontWeight: '500'
   }
 }
 

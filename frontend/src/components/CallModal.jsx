@@ -17,6 +17,7 @@ const CallModal = ({ contact, onClose, onSaveCallLog, alarmId, eventId, existing
   const sessionRef = useRef(existingSession)
   const timerRef = useRef(null)
   const remoteAudioRef = useRef(null)
+  const callTrackingIdRef = useRef(null)
 
   const resolutionOptions = [
     { value: '', label: 'Select Resolution...' },
@@ -88,6 +89,11 @@ const CallModal = ({ contact, onClose, onSaveCallLog, alarmId, eventId, existing
 
     const phoneNumber = contact.phone.replace(/[^0-9]/g, '')
 
+    // Generate a unique tracking ID for this call
+    const callTrackingId = `VM-${alarmId}-${eventId}-${Date.now()}`
+    callTrackingIdRef.current = callTrackingId
+    console.log('CallModal: Generated tracking ID:', callTrackingId)
+
     const eventHandlers = {
       'progress': () => {
         setCallState('ringing')
@@ -143,7 +149,13 @@ const CallModal = ({ contact, onClose, onSaveCallLog, alarmId, eventId, existing
       rtcAnswerConstraints: {
         offerToReceiveAudio: true,
         offerToReceiveVideo: false
-      }
+      },
+      extraHeaders: [
+        `X-VM-Tracking-ID: ${callTrackingId}`,
+        `X-VM-Alarm-ID: ${alarmId}`,
+        `X-VM-Event-ID: ${eventId}`,
+        `X-VM-Contact: ${contact.name.replace(/[^a-zA-Z0-9 ]/g, '')}`
+      ]
     }
 
     try {
@@ -215,11 +227,20 @@ const CallModal = ({ contact, onClose, onSaveCallLog, alarmId, eventId, existing
 
     const isCallActive = isInCall
 
+    // Extract call uniqueid from JsSIP session
+    let callUniqueid = null
+    if (sessionRef.current) {
+      // JsSIP session has an 'id' property which is the Call-ID
+      callUniqueid = sessionRef.current.id || null
+      console.log('CallModal: Extracted call uniqueid:', callUniqueid)
+    }
+
     console.log('CallModal handleSave:', {
       isCallActive,
       callState,
       hasSession: !!sessionRef.current,
-      contactPhone: contact.phone
+      contactPhone: contact.phone,
+      callUniqueid
     })
 
     const callLog = {
@@ -231,7 +252,9 @@ const CallModal = ({ contact, onClose, onSaveCallLog, alarmId, eventId, existing
       resolution: resolution,
       notes: notes,
       alarm_id: alarmId,
-      event_id: eventId
+      event_id: eventId,
+      call_uniqueid: callUniqueid,
+      call_tracking_id: callTrackingIdRef.current
     }
 
     // Pass the session and call state back if the call is still active

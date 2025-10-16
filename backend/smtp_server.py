@@ -422,16 +422,29 @@ class CustomSMTPHandler:
             print(f"[SMTP-DEBUG] Event {event.id} created, will be auto-assigned by main loop", flush=True)
             logger.info(f"[SMTP] Event {event.id} created for account {camera.account_id}")
 
-            # Broadcast to WebSocket clients
+            # Broadcast to WebSocket clients with account_id at root level for frontend filtering
             broadcast_data = {
                 "type": "new_event",
+                "event_id": event.id,
+                "camera_id": event.camera_id,
+                "camera_name": camera.name,
+                "account_id": camera.account_id,  # Add account_id at root level for filtering
+                "timestamp": event.timestamp.isoformat(),
+                "media_paths": event.media_paths,
+                "media_type": event.media_type,
                 "event": {
                     "id": event.id,
                     "camera_id": event.camera_id,
                     "timestamp": event.timestamp.isoformat(),
                     "media_type": event.media_type,
                     "media_paths": event.media_paths,
-                    "status": event.status
+                    "status": event.status,
+                    "camera": {
+                        "id": camera.id,
+                        "name": camera.name,
+                        "location": camera.location,
+                        "account_id": camera.account_id
+                    }
                 }
             }
             logger.info(f"[SMTP] Broadcasting new event {event.id} to {len(self.websocket_manager.active_connections)} WebSocket clients")

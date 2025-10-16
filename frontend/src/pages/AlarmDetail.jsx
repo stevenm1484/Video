@@ -430,7 +430,7 @@ export default function AlarmDetail() {
 
       if (!alarmData) {
         toast.error('Alarm not found')
-        navigate('/')
+        navigate('/monitoring')
         return
       }
 
@@ -494,6 +494,46 @@ export default function AlarmDetail() {
       toast.error('Failed to load alarm details')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const ensureCapture = async (cameraId) => {
+    if (!alarm || !alarm.event_id) return
+
+    const captureKey = `${alarm.event_id}_${cameraId}`
+
+    // Check if backend is already capturing
+    try {
+      const statusResponse = await api.get(`/events/${alarm.event_id}/capture-status`, {
+        params: { camera_id: cameraId }
+      })
+
+      if (statusResponse.data.is_active) {
+        console.log(`[AlarmDetail] Capture already active for ${captureKey} (continuing from Monitoring)`)
+        activeCaptures.current.add(captureKey)
+        return
+      }
+    } catch (err) {
+      console.error('[AlarmDetail] Failed to check capture status:', err)
+    }
+
+    // Start new capture if not already active
+    if (!activeCaptures.current.has(captureKey)) {
+      console.log(`[AlarmDetail] Starting new capture for camera ${cameraId}, event ${alarm.event_id}`)
+      try {
+        await api.post(`/events/${alarm.event_id}/start-capture`, null, {
+          params: { camera_id: cameraId }
+        })
+        activeCaptures.current.add(captureKey)
+        console.log(`[AlarmDetail] Capture started for ${captureKey}`)
+      } catch (err) {
+        if (err.response?.data?.message?.includes('already')) {
+          activeCaptures.current.add(captureKey)
+          console.log(`[AlarmDetail] Capture already in progress for ${captureKey}`)
+        } else {
+          console.error('[AlarmDetail] Failed to start capture:', err)
+        }
+      }
     }
   }
 
@@ -610,33 +650,12 @@ export default function AlarmDetail() {
         videoEl.addEventListener('playing', () => {
           console.log('Video playback started successfully')
 
-          // Start capturing after video confirms playing (5 second delay to ensure RTSP is stable)
+          // Start capturing after video confirms playing (1 second delay to ensure RTSP is stable)
           setTimeout(() => {
             if (alarm && alarm.event_id) {
-              const captureKey = `${alarm.event_id}_${cameraId}`
-              if (!activeCaptures.current.has(captureKey)) {
-                console.log(`[Single] Starting capture for camera ${cameraId}, event ${alarm.event_id}`)
-                api.post(`/events/${alarm.event_id}/start-capture`, null, {
-                  params: {
-                    camera_id: cameraId
-                  }
-                }).then(() => {
-                  activeCaptures.current.add(captureKey)
-                  console.log(`[Single] Capture started for ${captureKey}`)
-                }).catch(err => {
-                  // If error is "already capturing", that's OK - it was started on Monitoring page
-                  if (err.response?.status === 200) {
-                    activeCaptures.current.add(captureKey)
-                    console.log(`[Single] Capture already in progress for ${captureKey} (started from Monitoring)`)
-                  } else {
-                    console.error('[Single] Failed to start capture:', err)
-                  }
-                })
-              } else {
-                console.log(`[Single] Capture already tracked for ${captureKey}`)
-              }
+              ensureCapture(cameraId)
             }
-          }, 5000)
+          }, 1000)
         }, { once: true })
         videoEl.addEventListener('error', (e) => console.error('Video element error:', e))
 
@@ -699,32 +718,12 @@ export default function AlarmDetail() {
         liveVideoRef.current.addEventListener('playing', () => {
           console.log('[Single Safari] Video playback started successfully')
 
-          // Start capturing after video confirms playing (5 second delay to ensure RTSP is stable)
+          // Start capturing after video confirms playing (1 second delay to ensure RTSP is stable)
           setTimeout(() => {
             if (alarm && alarm.event_id) {
-              const captureKey = `${alarm.event_id}_${cameraId}`
-              if (!activeCaptures.current.has(captureKey)) {
-                console.log(`[Single Safari] Starting capture for camera ${cameraId}, event ${alarm.event_id}`)
-                api.post(`/events/${alarm.event_id}/start-capture`, null, {
-                  params: {
-                    camera_id: cameraId
-                  }
-                }).then(() => {
-                  activeCaptures.current.add(captureKey)
-                  console.log(`[Single Safari] Capture started for ${captureKey}`)
-                }).catch(err => {
-                  if (err.response?.status === 200) {
-                    activeCaptures.current.add(captureKey)
-                    console.log(`[Single Safari] Capture already in progress for ${captureKey}`)
-                  } else {
-                    console.error('[Single Safari] Failed to start capture:', err)
-                  }
-                })
-              } else {
-                console.log(`[Single Safari] Capture already tracked for ${captureKey}`)
-              }
+              ensureCapture(cameraId)
             }
-          }, 5000)
+          }, 1000)
         }, { once: true })
       }
     } catch (error) {
@@ -820,23 +819,12 @@ export default function AlarmDetail() {
 
       // Start capture after video confirms playing
       videoEl.addEventListener('playing', () => {
-        console.log(`[Grid] Video playing for camera ${cam.id}, starting capture in 5 seconds...`)
+        console.log(`[Grid] Video playing for camera ${cam.id}, starting capture in 1 second...`)
         setTimeout(() => {
-          const captureKey = `${alarm.event_id}_${cam.id}`
-          if (!activeCaptures.current.has(captureKey) && alarm && alarm.event_id) {
-            console.log(`[Grid] Starting capture for camera ${cam.id}, event ${alarm.event_id}`)
-            api.post(`/events/${alarm.event_id}/start-capture`, null, {
-              params: {
-                camera_id: cam.id
-              }
-            }).then(() => {
-              activeCaptures.current.add(captureKey)
-              console.log(`[Grid] Capture started for ${captureKey}`)
-            }).catch(err => {
-              console.error(`[Grid] Failed to start capture for camera ${cam.id}:`, err)
-            })
+          if (alarm && alarm.event_id) {
+            ensureCapture(cam.id)
           }
-        }, 5000)
+        }, 1000)
       }, { once: true })
 
       hls.on(window.Hls.Events.ERROR, (event, data) => {
@@ -867,23 +855,12 @@ export default function AlarmDetail() {
 
       // Start capture after video confirms playing
       videoEl.addEventListener('playing', () => {
-        console.log(`[Grid] Video playing for camera ${cam.id}, starting capture in 5 seconds...`)
+        console.log(`[Grid] Video playing for camera ${cam.id}, starting capture in 1 second...`)
         setTimeout(() => {
-          const captureKey = `${alarm.event_id}_${cam.id}`
-          if (!activeCaptures.current.has(captureKey) && alarm && alarm.event_id) {
-            console.log(`[Grid] Starting capture for camera ${cam.id}, event ${alarm.event_id}`)
-            api.post(`/events/${alarm.event_id}/start-capture`, null, {
-              params: {
-                camera_id: cam.id
-              }
-            }).then(() => {
-              activeCaptures.current.add(captureKey)
-              console.log(`[Grid] Capture started for ${captureKey}`)
-            }).catch(err => {
-              console.error(`[Grid] Failed to start capture for camera ${cam.id}:`, err)
-            })
+          if (alarm && alarm.event_id) {
+            ensureCapture(cam.id)
           }
-        }, 5000)
+        }, 1000)
       }, { once: true })
     }
   }
@@ -932,7 +909,7 @@ export default function AlarmDetail() {
         console.error('Failed to restore receiving state:', error)
       }
 
-      navigate(fromHistory ? '/history' : '/')
+      navigate(fromHistory ? '/history' : '/monitoring')
     } catch (error) {
       toast.error('Failed to resolve alarm')
     }
@@ -963,7 +940,7 @@ export default function AlarmDetail() {
           console.error('Failed to restore receiving state:', error)
         }
 
-        navigate(fromHistory ? '/history' : '/')
+        navigate(fromHistory ? '/history' : '/monitoring')
       } else {
         toast.error('Unable to escalate: No event associated with this alarm')
       }
@@ -1003,7 +980,7 @@ export default function AlarmDetail() {
         console.error('Failed to restore receiving state:', error)
       }
 
-      navigate(fromHistory ? '/history' : '/')
+      navigate(fromHistory ? '/history' : '/monitoring')
     } catch (error) {
       if (error.response?.status === 400 && error.response?.data?.detail) {
         toast.error(error.response.data.detail)
@@ -1127,7 +1104,17 @@ export default function AlarmDetail() {
       phone: phoneNumber
     }
 
-    // Create event handlers for proper audio setup
+    // Generate tracking ID for this camera call
+    const callTrackingId = `VM-${alarmId}-${event?.id || 0}-${Date.now()}`
+    console.log('Camera call tracking ID:', callTrackingId)
+
+    // Track call timing
+    let callStartTime = null
+    let callEndTime = null
+    let callDuration = 0
+    let callUniqueid = null
+
+    // Create event handlers for proper audio setup AND call tracking
     const eventHandlers = {
       'progress': () => {
         console.log('[Inbound Call] Call ringing...')
@@ -1136,16 +1123,48 @@ export default function AlarmDetail() {
           [phoneNumber]: { ...prev[phoneNumber], callState: 'ringing' }
         }))
       },
-      'confirmed': () => {
+      'confirmed': (e) => {
         console.log('[Inbound Call] Call connected!')
+        callStartTime = Date.now()
         toast.success(`Connected to ${cameraName}`)
         setActiveCalls(prev => ({
           ...prev,
           [phoneNumber]: { ...prev[phoneNumber], callState: 'connected' }
         }))
       },
-      'ended': () => {
+      'ended': (e) => {
         console.log('[Inbound Call] Call ended')
+        callEndTime = Date.now()
+
+        if (callStartTime) {
+          callDuration = Math.floor((callEndTime - callStartTime) / 1000) // seconds
+        }
+
+        // Save call log to backend
+        const callLog = {
+          contact_name: cameraName,
+          contact_phone: phoneNumber,
+          call_start: callStartTime ? new Date(callStartTime).toISOString() : new Date().toISOString(),
+          call_end: callEndTime ? new Date(callEndTime).toISOString() : new Date().toISOString(),
+          duration: callDuration,
+          resolution: 'contacted',
+          notes: '',
+          alarm_id: parseInt(alarmId),
+          event_id: event?.id,
+          call_uniqueid: callUniqueid,
+          call_tracking_id: callTrackingId
+        }
+
+        console.log('Saving camera call log:', callLog)
+
+        api.post(`/alarms/${alarmId}/call-log`, callLog)
+          .then(() => {
+            console.log('Camera call log saved successfully')
+          })
+          .catch(err => {
+            console.error('Failed to save camera call log:', err)
+          })
+
         setActiveCalls(prev => {
           const newCalls = { ...prev }
           delete newCalls[phoneNumber]
@@ -1155,6 +1174,28 @@ export default function AlarmDetail() {
       },
       'failed': (e) => {
         console.error('[Inbound Call] Call failed:', e)
+        callEndTime = Date.now()
+
+        // Save failed call log
+        const callLog = {
+          contact_name: cameraName,
+          contact_phone: phoneNumber,
+          call_start: callStartTime ? new Date(callStartTime).toISOString() : new Date().toISOString(),
+          call_end: new Date(callEndTime).toISOString(),
+          duration: callStartTime ? Math.floor((callEndTime - callStartTime) / 1000) : 0,
+          resolution: 'no_answer',
+          notes: '',
+          alarm_id: parseInt(alarmId),
+          event_id: event?.id,
+          call_uniqueid: callUniqueid,
+          call_tracking_id: callTrackingId
+        }
+
+        api.post(`/alarms/${alarmId}/call-log`, callLog)
+          .catch(err => {
+            console.error('Failed to save camera call log:', err)
+          })
+
         toast.error(`Failed to connect to ${cameraName}`)
         setActiveCalls(prev => {
           const newCalls = { ...prev }
@@ -1192,10 +1233,12 @@ export default function AlarmDetail() {
     }
 
     // Dial the number through WebRTC WITH event handlers
-    const session = makeCall(phoneNumber, pbxConfig, eventHandlers)
+    const session = makeCall(phoneNumber, pbxConfig, eventHandlers, callTrackingId)
 
     if (session) {
-      console.log(`[Inbound Call] Initiated WebRTC call to ${phoneNumber}`)
+      // Extract JsSIP Call-ID (uniqueid)
+      callUniqueid = session.id || session.call_id || null
+      console.log(`[Inbound Call] Initiated WebRTC call to ${phoneNumber}, Call-ID: ${callUniqueid}`)
       toast.success(`Dialing ${cameraName}...`)
 
       setActiveCalls(prev => ({
@@ -1207,6 +1250,22 @@ export default function AlarmDetail() {
         }
       }))
       activeCallSessionsRef.current[phoneNumber] = session
+
+      // Log to audit trail
+      api.post('/audit-log', {
+        action: 'inbound_call_initiated',
+        alarm_id: parseInt(alarmId),
+        event_id: event?.id,
+        details: {
+          phone_number: phoneNumber,
+          camera_name: cameraName,
+          call_type: 'camera_inbound',
+          call_uniqueid: callUniqueid,
+          call_tracking_id: callTrackingId
+        }
+      }).catch(err => {
+        console.error('Failed to log inbound call to audit:', err)
+      })
     } else {
       console.error('[Inbound Call] Failed to initiate call - makeCall returned null')
       toast.error('Failed to initiate call. Please check your phone connection.')
@@ -1248,11 +1307,11 @@ export default function AlarmDetail() {
           .catch(err => console.error('Failed to release claim:', err))
       }
 
-      navigate(fromHistory ? '/history' : '/')
+      navigate(fromHistory ? '/history' : '/monitoring')
     } catch (error) {
       console.error('Failed to revert alarm:', error)
       // Navigate anyway even if revert fails
-      navigate(fromHistory ? '/history' : '/')
+      navigate(fromHistory ? '/history' : '/monitoring')
     }
   }
 
@@ -1265,12 +1324,46 @@ export default function AlarmDetail() {
     }
     setActionPlanState(newState)
 
+    // Find the step details for logging
+    const findStep = (steps, id) => {
+      for (const step of steps) {
+        if (step.id === id) return step
+        if (step.yesSteps) {
+          const found = findStep(step.yesSteps, id)
+          if (found) return found
+        }
+        if (step.noSteps) {
+          const found = findStep(step.noSteps, id)
+          if (found) return found
+        }
+      }
+      return null
+    }
+
+    const step = account?.action_plan ? findStep(account.action_plan, stepId) : null
+    const stepLabel = step ? (step.label || step.content || 'Unknown step') : 'Unknown step'
+    const action = newState[stepId] ? 'checked' : 'unchecked'
+
     try {
+      // Update alarm with new state
       await api.put(`/alarms/${alarmId}`, {
         notes,
         resolution,
         call_logs: callLogs,
         action_plan_state: newState
+      })
+
+      // Log the action plan step toggle
+      await api.post('/audit-log', {
+        action: 'action_plan_step_toggled',
+        alarm_id: alarmId,
+        event_id: alarm?.event_id,
+        details: {
+          step_id: stepId,
+          step_label: stepLabel,
+          step_type: step?.type || 'text',
+          action: action
+        }
       })
     } catch (error) {
       console.error('Failed to update action plan state:', error)
@@ -1482,7 +1575,7 @@ export default function AlarmDetail() {
           )}
           <button style={styles.backBtn} onClick={handleBackToDashboard}>
             <ArrowLeft size={20} />
-            <span>{fromHistory ? 'Back to History' : 'Back to Dashboard'}</span>
+            <span>{fromHistory ? 'Back to History' : 'Back to Monitoring'}</span>
           </button>
         </div>
       </div>
@@ -1735,45 +1828,56 @@ export default function AlarmDetail() {
                     </div>
                   </div>
                   <div style={styles.videoContainer}>
-                    {event.media_paths && event.media_paths.filter(path => !path.endsWith('.wav') && !path.endsWith('.mp3') && !path.endsWith('.ogg')).length > 0 ? (
-                      <>
-                        {event.media_type === 'video' || event.media_paths[selectedMediaIndex]?.endsWith('.mp4') ? (
-                          <video
-                            key={event.media_paths[selectedMediaIndex]}
-                            src={`/${event.media_paths[selectedMediaIndex]}`}
-                            style={styles.video}
-                            controls
-                            autoPlay
-                            loop
-                            muted
-                          />
-                        ) : (
-                          <img
-                            src={`/${event.media_paths[selectedMediaIndex]}`}
-                            alt="Event capture"
-                            style={styles.video}
-                          />
-                        )}
-                        {event.media_paths.filter(path => !path.endsWith('.wav') && !path.endsWith('.mp3') && !path.endsWith('.ogg')).length > 1 && (
-                          <div style={styles.mediaThumbs}>
-                            {event.media_paths.filter(path => !path.endsWith('.wav') && !path.endsWith('.mp3') && !path.endsWith('.ogg')).map((path, idx) => (
-                              <div
-                                key={idx}
-                                style={{
-                                  ...styles.thumb,
-                                  ...(selectedMediaIndex === idx ? styles.thumbActive : {})
-                                }}
-                                onClick={() => setSelectedMediaIndex(idx)}
-                              >
-                                <img src={`/${path}`} alt={`Media ${idx + 1}`} style={styles.thumbImage} />
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <div style={styles.noMedia}>No media available</div>
-                    )}
+                    {(() => {
+                      // Filter out audio files - only show images/videos
+                      const visualMedia = event.media_paths ? event.media_paths.filter(path =>
+                        !path.endsWith('.wav') && !path.endsWith('.mp3') && !path.endsWith('.ogg')
+                      ) : []
+
+                      if (visualMedia.length === 0) {
+                        return <div style={styles.noMedia}>No media available</div>
+                      }
+
+                      const currentMedia = visualMedia[selectedMediaIndex] || visualMedia[0]
+
+                      return (
+                        <>
+                          {event.media_type === 'video' || currentMedia?.endsWith('.mp4') ? (
+                            <video
+                              key={currentMedia}
+                              src={`/${currentMedia}`}
+                              style={styles.video}
+                              controls
+                              autoPlay
+                              loop
+                              muted
+                            />
+                          ) : (
+                            <img
+                              src={`/${currentMedia}`}
+                              alt="Event capture"
+                              style={styles.video}
+                            />
+                          )}
+                          {visualMedia.length > 1 && (
+                            <div style={styles.mediaThumbs}>
+                              {visualMedia.map((path, idx) => (
+                                <div
+                                  key={idx}
+                                  style={{
+                                    ...styles.thumb,
+                                    ...(selectedMediaIndex === idx ? styles.thumbActive : {})
+                                  }}
+                                  onClick={() => setSelectedMediaIndex(idx)}
+                                >
+                                  <img src={`/${path}`} alt={`Media ${idx + 1}`} style={styles.thumbImage} />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
 
@@ -1847,24 +1951,74 @@ export default function AlarmDetail() {
                 account={account}
                 actionPlanState={actionPlanState}
                 onToggleStep={handleToggleActionPlanStep}
-                onAnswerQuestion={(stepId, answer) => {
+                onAnswerQuestion={async (stepId, answer) => {
                   const newState = {
                     ...actionPlanState,
                     [stepId]: answer
                   }
                   setActionPlanState(newState)
-                  api.put(`/alarms/${alarmId}`, {
-                    notes,
-                    resolution,
-                    call_logs: callLogs,
-                    action_plan_state: newState
-                  }).catch(err => {
+
+                  // Find the step details for logging
+                  const findStep = (steps, id) => {
+                    for (const step of steps) {
+                      if (step.id === id) return step
+                      if (step.yesSteps) {
+                        const found = findStep(step.yesSteps, id)
+                        if (found) return found
+                      }
+                      if (step.noSteps) {
+                        const found = findStep(step.noSteps, id)
+                        if (found) return found
+                      }
+                    }
+                    return null
+                  }
+
+                  const step = account?.action_plan ? findStep(account.action_plan, stepId) : null
+                  const stepLabel = step ? (step.label || step.content || 'Unknown question') : 'Unknown question'
+
+                  try {
+                    await api.put(`/alarms/${alarmId}`, {
+                      notes,
+                      resolution,
+                      call_logs: callLogs,
+                      action_plan_state: newState
+                    })
+
+                    // Log the yes/no answer
+                    await api.post('/audit-log', {
+                      action: 'action_plan_question_answered',
+                      alarm_id: alarmId,
+                      event_id: alarm?.event_id,
+                      details: {
+                        step_id: stepId,
+                        step_label: stepLabel,
+                        answer: answer.toUpperCase()
+                      }
+                    })
+                  } catch (err) {
                     console.error('Failed to update action plan state:', err)
                     toast.error('Failed to update action plan')
-                  })
+                  }
                 }}
                 onWebhookTrigger={handleWebhookTrigger}
-                onOpenGridView={() => setShowGridViewModal(true)}
+                onOpenGridView={async () => {
+                  setShowGridViewModal(true)
+                  // Log camera grid view action
+                  try {
+                    await api.post('/audit-log', {
+                      action: 'action_plan_cameras_viewed',
+                      alarm_id: alarmId,
+                      event_id: alarm?.event_id,
+                      details: {
+                        view_type: 'grid',
+                        camera_count: account?.cameras?.length || 0
+                      }
+                    })
+                  } catch (err) {
+                    console.error('Failed to log camera view:', err)
+                  }
+                }}
                 fromHistory={fromHistory}
                 alarmId={alarmId}
                 notes={notes}
@@ -2044,22 +2198,12 @@ export default function AlarmDetail() {
                                 {apartment.tenants.map(tenant => (
                                   <div
                                     key={tenant.id}
-                                    onClick={() => {
-                                      setSelectedTenants(prev => {
-                                        if (prev.includes(tenant.id)) {
-                                          return prev.filter(id => id !== tenant.id)
-                                        } else {
-                                          return [...prev, tenant.id]
-                                        }
-                                      })
-                                    }}
                                     style={{
                                       display: 'flex',
                                       alignItems: 'center',
                                       gap: '0.75rem',
                                       padding: '0.5rem',
                                       marginBottom: '0.5rem',
-                                      cursor: 'pointer',
                                       borderRadius: '0.375rem',
                                       background: selectedTenants.includes(tenant.id) ? '#1e40af30' : 'transparent',
                                       transition: 'background 0.2s'
@@ -2068,7 +2212,16 @@ export default function AlarmDetail() {
                                     <input
                                       type="checkbox"
                                       checked={selectedTenants.includes(tenant.id)}
-                                      onChange={() => {}} // Handled by parent div onClick
+                                      onChange={() => {
+                                        setSelectedTenants(prev => {
+                                          if (prev.includes(tenant.id)) {
+                                            return prev.filter(id => id !== tenant.id)
+                                          } else {
+                                            return [...prev, tenant.id]
+                                          }
+                                        })
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
                                       style={{
                                         width: '16px',
                                         height: '16px',
@@ -2088,11 +2241,38 @@ export default function AlarmDetail() {
                                         color: '#94a3b8',
                                         marginTop: '0.25rem'
                                       }}>
-                                        {tenant.phone_number && tenant.sms_enabled && '📱 SMS '}
-                                        {tenant.email && tenant.email_enabled && '📧 Email'}
+                                        {tenant.phone_number && (
+                                          <>
+                                            <Phone size={12} style={{display: 'inline', marginRight: '0.25rem'}} />
+                                            {tenant.phone_number}
+                                          </>
+                                        )}
+                                        {tenant.phone_number && tenant.sms_enabled && ' • SMS'}
+                                        {tenant.email && tenant.email_enabled && ' • 📧 Email'}
+                                        {!tenant.phone_number && tenant.email && tenant.email_enabled && '📧 Email only'}
                                         {(!tenant.phone_number || !tenant.sms_enabled) && (!tenant.email || !tenant.email_enabled) && 'No notifications enabled'}
                                       </div>
                                     </div>
+                                    {/* Call Button - only show if tenant has a phone number and not in history view */}
+                                    {tenant.phone_number && !fromHistory && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          setSelectedContact({
+                                            name: `${tenant.name} (Apt ${apartment.apartment_number})`,
+                                            phone: tenant.phone_number
+                                          })
+                                          setShowCallModal(true)
+                                        }}
+                                        style={{
+                                          ...styles.compactCallBtn,
+                                          flexShrink: 0
+                                        }}
+                                        title={`Call ${tenant.name}`}
+                                      >
+                                        <Phone size={16} />
+                                      </button>
+                                    )}
                                   </div>
                                 ))}
                               </div>
@@ -2262,6 +2442,8 @@ export default function AlarmDetail() {
             {activeTab === 'tools' && account && (
               <ToolsManager
                 accountId={account.id}
+                alarmId={parseInt(alarmId)}
+                eventId={event?.id}
                 readOnly={true}
                 onRelayTriggered={(data) => {
                   // Handle camera view tool
@@ -2377,6 +2559,8 @@ export default function AlarmDetail() {
           callLogs={callLogs}
           account={account}
           event={event}
+          alarmId={parseInt(alarmId)}
+          eventId={event?.id}
           formatTimestampInTimezone={formatTimestampInTimezone}
           onDialInboundNumber={handleDialInboundNumber}
           onToolTriggered={(data) => {

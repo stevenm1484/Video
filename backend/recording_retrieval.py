@@ -56,16 +56,26 @@ class RecordingRetrieval:
 
                 # Get file stats and filter by modification time
                 candidates = []
+                logger.info(f"Searching {len(files)} files in {remote_dir} for timestamp match")
                 for filename in files:
                     if filename.endswith('.wav') or filename.endswith('.mp3'):
                         remote_path = f"{remote_dir}/{filename}"
                         try:
                             stat = sftp.stat(remote_path)
-                            file_mtime = datetime.fromtimestamp(stat.st_mtime)
+                            # Create UTC datetime from timestamp
+                            from datetime import timezone
+                            file_mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+
+                            # Ensure call_timestamp is timezone-aware (make it UTC if naive)
+                            call_ts = call_timestamp
+                            if call_ts.tzinfo is None:
+                                call_ts = call_ts.replace(tzinfo=timezone.utc)
 
                             # Check if file was created within time window
-                            time_diff = abs((file_mtime - call_timestamp).total_seconds())
+                            time_diff = abs((file_mtime - call_ts).total_seconds())
+                            logger.debug(f"File {filename}: mtime={file_mtime}, call_ts={call_ts}, diff={time_diff:.1f}s")
                             if time_diff <= time_window:
+                                logger.info(f"Candidate match: {filename} (diff: {time_diff:.1f}s)")
                                 candidates.append((remote_path, file_mtime, time_diff))
                         except Exception as e:
                             logger.debug(f"Could not stat file {filename}: {e}")
@@ -93,6 +103,143 @@ class RecordingRetrieval:
         except Exception as e:
             logger.error(f"SFTP connection error: {e}")
 
+        return None
+
+    async def find_recording_by_tracking_id(self, tracking_id: str, call_timestamp: datetime, max_wait: int = 30) -> Optional[str]:
+        """
+        Find a recording file by VM tracking ID (preferred method)
+
+        Tracking ID format: VM-{alarm_id}-{event_id}-{timestamp}
+        Example: VM-242-484-1760640000000
+
+        Args:
+            tracking_id: The VM tracking ID sent in SIP headers
+            call_timestamp: When the call was initiated
+            max_wait: Maximum seconds to wait for recording to appear
+
+        Returns:
+            Remote file path or None if not found
+        """
+        for attempt in range(max_wait):
+            try:
+                year = call_timestamp.strftime("%Y")
+                month = call_timestamp.strftime("%m")
+                day = call_timestamp.strftime("%d")
+
+                remote_dir = f"{self.recordings_path}/{year}/{month}/{day}"
+
+                transport = paramiko.Transport((self.host, self.port))
+                private_key = paramiko.RSAKey.from_private_key_file(self.key_path)
+                transport.connect(username=self.username, pkey=private_key)
+                sftp = paramiko.SFTPClient.from_transport(transport)
+
+                try:
+                    files = sftp.listdir(remote_dir)
+
+                    # Find file matching tracking ID
+                    for filename in files:
+                        if tracking_id in filename and (filename.endswith('.wav') or filename.endswith('.mp3')):
+                            remote_path = f"{remote_dir}/{filename}"
+                            logger.info(f"Found recording by tracking ID: {remote_path}")
+                            sftp.close()
+                            transport.close()
+                            return remote_path
+
+                except FileNotFoundError:
+                    logger.warning(f"Recording directory not found: {remote_dir}")
+                except Exception as e:
+                    logger.error(f"Error listing recordings: {e}")
+                finally:
+                    sftp.close()
+                    transport.close()
+
+            except Exception as e:
+                logger.error(f"SFTP connection error: {e}")
+
+            if attempt < max_wait - 1:
+                await asyncio.sleep(1)
+                logger.debug(f"Recording not found by tracking ID yet, retrying... (attempt {attempt + 1}/{max_wait})")
+
+        logger.info(f"Tracking ID {tracking_id} not found after {max_wait} attempts")
+        return None
+
+    async def find_recording_by_parking_slot(self, parking_slot: str, call_timestamp: datetime, max_wait: int = 30) -> Optional[str]:
+        """
+        Find a parked call recording by parking slot number and timestamp
+
+        When calls are parked, Asterisk creates a new uniqueid, so we search for files
+        containing "parked" in the name within a time window of the call.
+
+        Args:
+            parking_slot: The parking slot number (e.g., "71")
+            call_timestamp: When the call was parked
+            max_wait: Maximum seconds to wait for recording
+
+        Returns:
+            Remote file path or None if not found
+        """
+        for attempt in range(max_wait):
+            try:
+                year = call_timestamp.strftime("%Y")
+                month = call_timestamp.strftime("%m")
+                day = call_timestamp.strftime("%d")
+                remote_dir = f"{self.recordings_path}/{year}/{month}/{day}"
+
+                transport = paramiko.Transport((self.host, self.port))
+                private_key = paramiko.RSAKey.from_private_key_file(self.key_path)
+                transport.connect(username=self.username, pkey=private_key)
+                sftp = paramiko.SFTPClient.from_transport(transport)
+
+                try:
+                    files = sftp.listdir(remote_dir)
+
+                    # Find files with "parked" in name, check timestamp proximity (within 60 seconds)
+                    candidates = []
+                    for filename in files:
+                        if "parked" in filename.lower() and (filename.endswith('.wav') or filename.endswith('.mp3')):
+                            remote_path = f"{remote_dir}/{filename}"
+                            try:
+                                stat = sftp.stat(remote_path)
+                                from datetime import timezone
+                                file_mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+
+                                call_ts = call_timestamp
+                                if call_ts.tzinfo is None:
+                                    call_ts = call_ts.replace(tzinfo=timezone.utc)
+
+                                time_diff = abs((file_mtime - call_ts).total_seconds())
+                                if time_diff <= 60:  # Within 60 seconds
+                                    candidates.append((remote_path, file_mtime, time_diff))
+                                    logger.info(f"Found parked recording candidate: {filename} (time diff: {time_diff:.1f}s)")
+                            except Exception as e:
+                                logger.debug(f"Could not stat file {filename}: {e}")
+                                continue
+
+                    # Return the closest match
+                    if candidates:
+                        candidates.sort(key=lambda x: x[2])
+                        best_match = candidates[0]
+                        logger.info(f"Found parked recording for slot {parking_slot}: {best_match[0]} (time diff: {best_match[2]:.1f}s)")
+                        sftp.close()
+                        transport.close()
+                        return best_match[0]
+
+                except FileNotFoundError:
+                    logger.warning(f"Recording directory not found: {remote_dir}")
+                except Exception as e:
+                    logger.error(f"Error listing recordings: {e}")
+                finally:
+                    sftp.close()
+                    transport.close()
+
+            except Exception as e:
+                logger.error(f"SFTP connection error: {e}")
+
+            if attempt < max_wait - 1:
+                await asyncio.sleep(1)
+                logger.debug(f"Parked recording not found yet, retrying... (attempt {attempt + 1}/{max_wait})")
+
+        logger.info(f"Parked recording for slot {parking_slot} not found after {max_wait} attempts")
         return None
 
     async def find_recording_by_uniqueid(self, uniqueid: str, call_timestamp: datetime, max_wait: int = 30) -> Optional[str]:
@@ -155,9 +302,9 @@ class RecordingRetrieval:
                 await asyncio.sleep(1)
                 logger.debug(f"Recording not found by uniqueid yet, retrying... (attempt {attempt + 1}/{max_wait})")
 
-        # If not found by uniqueid after max_wait, try timestamp-based search as fallback
-        logger.info(f"Uniqueid {uniqueid} not found after {max_wait} attempts, trying timestamp-based search...")
-        return await self.find_recording_by_timestamp(call_timestamp, time_window=120)
+        # Recording not found - do NOT fall back to timestamp search as it often picks wrong recordings
+        logger.info(f"Uniqueid {uniqueid} not found after {max_wait} attempts. No recording available.")
+        return None
 
     async def download_recording(self, remote_path: str) -> Optional[str]:
         """
@@ -189,6 +336,19 @@ class RecordingRetrieval:
             sftp = paramiko.SFTPClient.from_transport(transport)
 
             try:
+                # Check remote file size before downloading
+                remote_stat = sftp.stat(remote_path)
+                remote_size = remote_stat.st_size
+
+                # Skip files smaller than 1KB (likely empty/corrupted recordings)
+                if remote_size < 1024:
+                    logger.warning(f"Skipping small recording file ({remote_size} bytes): {remote_path}")
+                    sftp.close()
+                    transport.close()
+                    return None
+
+                logger.info(f"Remote recording size: {remote_size / 1024:.1f} KB")
+
                 # Download file to temp location
                 sftp.get(remote_path, str(temp_path))
                 logger.info(f"Successfully downloaded recording to temp: {temp_filename}")
@@ -214,11 +374,24 @@ class RecordingRetrieval:
                 )
 
                 if result.returncode == 0:
-                    logger.info(f"Successfully transcoded recording: {final_filename}")
-                    # Remove temp file
-                    temp_path.unlink()
-                    # Return relative path for database
-                    return f"uploads/{final_filename}"
+                    # Verify the transcoded file has reasonable size
+                    if final_path.exists():
+                        final_size = final_path.stat().st_size
+                        if final_size < 1024:
+                            logger.warning(f"Transcoded file is too small ({final_size} bytes), likely corrupted: {final_filename}")
+                            # Clean up small files
+                            final_path.unlink()
+                            temp_path.unlink()
+                            return None
+
+                        logger.info(f"Successfully transcoded recording: {final_filename} ({final_size / 1024:.1f} KB)")
+                        # Remove temp file
+                        temp_path.unlink()
+                        # Return relative path for database
+                        return f"uploads/{final_filename}"
+                    else:
+                        logger.error(f"Transcoded file not found: {final_filename}")
+                        return None
                 else:
                     logger.error(f"FFmpeg transcode failed: {result.stderr}")
                     # Fall back to original file if transcode fails
@@ -236,23 +409,44 @@ class RecordingRetrieval:
             logger.error(f"SFTP connection error during download: {e}")
             return None
 
-    async def retrieve_and_download(self, uniqueid: str, call_timestamp: datetime, max_wait: int = 30) -> Optional[str]:
+    async def retrieve_and_download(self, uniqueid: str, call_timestamp: datetime, max_wait: int = 30, tracking_id: str = None, parking_slot: str = None) -> Optional[str]:
         """
-        Find and download a recording by uniqueid with timestamp fallback
+        Find and download a recording with multiple fallback methods
+
+        Priority order:
+        1. Tracking ID (if provided and FreePBX configured)
+        2. Parking slot (if this is a parked call)
+        3. Uniqueid/Call-ID
 
         Args:
-            uniqueid: The call unique ID
-            call_timestamp: When the call event was created (for fallback search)
+            uniqueid: The call unique ID (JsSIP Call-ID)
+            call_timestamp: When the call event was created
             max_wait: Maximum seconds to wait for recording
+            tracking_id: VM tracking ID (e.g., VM-242-484-1760640000000)
+            parking_slot: Parking slot number (e.g., "71") for parked calls
 
         Returns:
             Local file path relative to uploads directory, or None if failed
         """
-        # Find the recording (includes timestamp fallback)
-        remote_path = await self.find_recording_by_uniqueid(uniqueid, call_timestamp, max_wait)
+        remote_path = None
+
+        # Try tracking ID first (most reliable if FreePBX is configured)
+        if tracking_id:
+            logger.info(f"Attempting to find recording by tracking ID: {tracking_id}")
+            remote_path = await self.find_recording_by_tracking_id(tracking_id, call_timestamp, max_wait=10)
+
+        # Try parking slot search for parked calls (more reliable than uniqueid)
+        if not remote_path and parking_slot:
+            logger.info(f"Tracking ID not found, trying parking slot: {parking_slot}")
+            remote_path = await self.find_recording_by_parking_slot(parking_slot, call_timestamp, max_wait=30)
+
+        # Fall back to uniqueid search
+        if not remote_path:
+            logger.info(f"Parking slot not found, trying uniqueid: {uniqueid}")
+            remote_path = await self.find_recording_by_uniqueid(uniqueid, call_timestamp, max_wait)
 
         if not remote_path:
-            logger.warning(f"Could not find recording for uniqueid {uniqueid}")
+            logger.warning(f"Could not find recording for tracking_id={tracking_id}, parking_slot={parking_slot}, uniqueid={uniqueid}")
             return None
 
         # Download it

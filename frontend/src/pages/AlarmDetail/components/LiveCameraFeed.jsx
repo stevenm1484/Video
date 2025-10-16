@@ -17,6 +17,8 @@ export default function LiveCameraFeed({
   callLogs,
   account,
   event,
+  alarmId,
+  eventId,
   formatTimestampInTimezone,
   onDialInboundNumber,
   onToolTriggered
@@ -69,7 +71,11 @@ export default function LiveCameraFeed({
     }
 
     try {
-      const params = relayNumber ? `?relay_number=${relayNumber}` : ''
+      let params = relayNumber ? `?relay_number=${relayNumber}` : ''
+      // Add alarm_id and event_id for audit logging
+      if (alarmId && eventId) {
+        params += (params ? '&' : '?') + `alarm_id=${alarmId}&event_id=${eventId}`
+      }
       const response = await api.post(`/tools/${toolId}/trigger${params}`)
       toast.success(response.data.message || 'Tool triggered successfully')
     } catch (error) {
@@ -80,7 +86,12 @@ export default function LiveCameraFeed({
 
   const handleGroupTrigger = async (groupId) => {
     try {
-      const response = await api.post(`/tool-groups/${groupId}/trigger`)
+      let params = ''
+      // Add alarm_id and event_id for audit logging
+      if (alarmId && eventId) {
+        params = `?alarm_id=${alarmId}&event_id=${eventId}`
+      }
+      const response = await api.post(`/tool-groups/${groupId}/trigger${params}`)
       toast.success(response.data.message || 'Tool group triggered successfully')
 
       // Check if any of the results contain a camera_view that should be opened

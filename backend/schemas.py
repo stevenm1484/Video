@@ -706,3 +706,10 @@ class ApartmentResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# Audit Log schemas
+class AuditLogCreate(BaseModel):
+    action: str
+    alarm_id: Optional[int] = None
+    event_id: Optional[int] = None
+    details: Optional[dict] = None

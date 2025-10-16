@@ -1342,6 +1342,76 @@ function CamerasTab({ account, cameras, snapshots, loadingSnapshots, onAddCamera
 function ActionPlanTab({ account, onManageActionPlan }) {
   const hasActionPlan = account?.action_plan && account.action_plan.length > 0
 
+  // Recursively render action plan steps in read-only mode
+  const renderStep = (step, index, level = 0) => {
+    const indent = level * 24
+    const isRootLevel = level === 0
+
+    const getStepIcon = () => {
+      if (step.type === 'goto') return '→'
+      if (step.type === 'view_cameras') return '📹'
+      if (step.type === 'tool') return '⚡'
+      return '•'
+    }
+
+    const getStepText = () => {
+      if (step.type === 'goto') {
+        return `Go to Step ${step.gotoStep}`
+      } else if (step.type === 'view_cameras') {
+        return step.label || 'View All Cameras'
+      } else if (step.type === 'tool') {
+        const relayText = step.relay_number ? ` - Relay ${step.relay_number}` : ''
+        return `${step.label || step.tool_name || 'Trigger Tool'}${relayText}`
+      }
+      return step.content || step.label || 'Empty step'
+    }
+
+    return (
+      <div key={step.id || index} style={{marginBottom: '0.75rem'}}>
+        <div style={{
+          ...styles.readOnlyStep,
+          marginLeft: `${indent}px`,
+          ...(step.isBoolean ? styles.readOnlyStepBoolean : {})
+        }}>
+          {isRootLevel && (
+            <div style={styles.readOnlyStepNumber}>{index + 1}</div>
+          )}
+          <span style={styles.readOnlyStepIcon}>{getStepIcon()}</span>
+          <span style={styles.readOnlyStepText}>{getStepText()}</span>
+          {step.isBoolean && <span style={styles.readOnlyBooleanBadge}>?</span>}
+        </div>
+
+        {step.isBoolean && (
+          <div style={{marginLeft: `${indent + 24}px`, marginTop: '0.5rem'}}>
+            {/* YES branch */}
+            {step.yesSteps && step.yesSteps.length > 0 && (
+              <div style={styles.readOnlyBranch}>
+                <div style={styles.readOnlyBranchLabel}>
+                  <span style={styles.readOnlyYesBadge}>YES</span>
+                </div>
+                {step.yesSteps.map((childStep, childIndex) =>
+                  renderStep(childStep, childIndex, level + 1)
+                )}
+              </div>
+            )}
+
+            {/* NO branch */}
+            {step.noSteps && step.noSteps.length > 0 && (
+              <div style={styles.readOnlyBranch}>
+                <div style={styles.readOnlyBranchLabel}>
+                  <span style={styles.readOnlyNoBadge}>NO</span>
+                </div>
+                {step.noSteps.map((childStep, childIndex) =>
+                  renderStep(childStep, childIndex, level + 1)
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div style={styles.tabContent}>
       <div style={styles.cameraHeader}>
@@ -1354,7 +1424,17 @@ function ActionPlanTab({ account, onManageActionPlan }) {
 
       <div style={styles.card}>
         {hasActionPlan ? (
-          <ActionPlanTree steps={account.action_plan} readOnly />
+          <div style={styles.actionPlanPreview}>
+            <div style={styles.actionPlanHeader}>
+              <h3 style={styles.actionPlanTitle}>Current Action Plan</h3>
+              <p style={styles.actionPlanSubtitle}>
+                This plan will be displayed to operators when viewing alarms for this account
+              </p>
+            </div>
+            <div style={styles.actionPlanSteps}>
+              {account.action_plan.map((step, index) => renderStep(step, index))}
+            </div>
+          </div>
         ) : (
           <div style={styles.emptyState}>
             <ListChecks size={48} style={{color: '#475569', marginBottom: '1rem'}} />
@@ -2806,13 +2886,15 @@ function ActionPlanModal({ account, cameras, onClose, onSave }) {
     }
   }
 
-  const handleSave = async () => {
+  const handleSaveActionPlan = async (steps) => {
+    console.log('ActionPlanModal: handleSaveActionPlan called with steps:', steps)
     setLoading(true)
     try {
       const response = await api.put(`/accounts/${account.id}`, {
         ...account,
-        action_plan: actionPlan
+        action_plan: steps
       })
+      toast.success('Action plan saved successfully')
       onSave(response.data)
     } catch (error) {
       toast.error('Failed to save action plan')
@@ -2840,7 +2922,7 @@ function ActionPlanModal({ account, cameras, onClose, onSave }) {
           ) : (
             <ActionPlanTree
               initialSteps={actionPlan}
-              onSave={setActionPlan}
+              onSave={handleSaveActionPlan}
               onClose={onClose}
               availableCameras={cameras || []}
               availableTools={tools}
@@ -4722,6 +4804,103 @@ const styles = {
     fontWeight: '600',
     color: '#e2e8f0',
     marginBottom: '0.75rem'
+  },
+  // Action Plan Read-Only Styles
+  actionPlanPreview: {
+    padding: '1rem'
+  },
+  actionPlanHeader: {
+    marginBottom: '1.5rem',
+    paddingBottom: '1rem',
+    borderBottom: '2px solid #334155'
+  },
+  actionPlanTitle: {
+    fontSize: '1.25rem',
+    fontWeight: '600',
+    color: '#e2e8f0',
+    margin: '0 0 0.5rem 0'
+  },
+  actionPlanSubtitle: {
+    fontSize: '0.875rem',
+    color: '#94a3b8',
+    margin: 0
+  },
+  actionPlanSteps: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem'
+  },
+  readOnlyStep: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    padding: '0.75rem 1rem',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: '0.5rem',
+    transition: 'all 0.2s'
+  },
+  readOnlyStepBoolean: {
+    borderLeft: '4px solid #f59e0b'
+  },
+  readOnlyStepNumber: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: '28px',
+    height: '28px',
+    background: '#3b82f6',
+    borderRadius: '50%',
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: '700'
+  },
+  readOnlyStepIcon: {
+    fontSize: '1.25rem',
+    minWidth: '24px',
+    textAlign: 'center'
+  },
+  readOnlyStepText: {
+    flex: 1,
+    color: '#e2e8f0',
+    fontSize: '0.95rem',
+    fontWeight: '500'
+  },
+  readOnlyBooleanBadge: {
+    background: '#f59e0b',
+    color: '#fff',
+    padding: '0.25rem 0.5rem',
+    borderRadius: '0.25rem',
+    fontSize: '0.75rem',
+    fontWeight: '700'
+  },
+  readOnlyBranch: {
+    marginBottom: '0.75rem',
+    paddingLeft: '1rem',
+    borderLeft: '3px solid #475569'
+  },
+  readOnlyBranchLabel: {
+    marginBottom: '0.5rem'
+  },
+  readOnlyYesBadge: {
+    display: 'inline-block',
+    background: '#10b981',
+    color: '#fff',
+    padding: '0.25rem 0.75rem',
+    borderRadius: '0.375rem',
+    fontSize: '0.75rem',
+    fontWeight: '700',
+    textTransform: 'uppercase'
+  },
+  readOnlyNoBadge: {
+    display: 'inline-block',
+    background: '#ef4444',
+    color: '#fff',
+    padding: '0.25rem 0.75rem',
+    borderRadius: '0.375rem',
+    fontSize: '0.75rem',
+    fontWeight: '700',
+    textTransform: 'uppercase'
   }
 }
 

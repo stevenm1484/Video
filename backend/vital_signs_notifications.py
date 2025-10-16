@@ -88,7 +88,8 @@ class VitalSignsNotificationService:
                     camera_id=camera.id,
                     timestamp=datetime.utcnow(),
                     media_type="alert",  # "alert" indicates system-generated vital signs alert
-                    media_paths=[],  # No media for system alerts
+                    alert_type="connectivity",  # Specify this is a connectivity alert
+                    media_paths=[],  # No media for connectivity alerts
                     status="pending"
                 )
 
@@ -102,11 +103,16 @@ class VitalSignsNotificationService:
         except Exception as e:
             logger.error(f"Error sending connectivity alert for camera {camera.id}: {e}", exc_info=True)
 
-    async def send_image_change_alert(self, db: Session, camera: Camera, status: CameraVitalSignsStatus):
+    async def send_image_change_alert(self, db: Session, camera: Camera, status: CameraVitalSignsStatus,
+                                      previous_image_path: str = None, current_image_path: str = None):
         """
         Send alert when significant image change is detected (camera moved/blocked)
         Creates an AlarmEvent to notify operators and sends email with image comparison
         Only creates ONE event when first detected, not on every subsequent check
+
+        Args:
+            previous_image_path: Path to the baseline image that was compared against
+            current_image_path: Path to the new image that triggered the change detection
         """
         try:
             account = db.query(VideoAccount).filter(VideoAccount.id == camera.account_id).first()
@@ -131,22 +137,24 @@ class VitalSignsNotificationService:
                     # Get hierarchy info for email content
                     hierarchy_info = get_hierarchy_info(db, account.id)
 
-                    # Get image paths from camera's vital signs checks
-                    from models import CameraVitalSignsCheck
-                    latest_check = db.query(CameraVitalSignsCheck)\
-                        .filter(CameraVitalSignsCheck.camera_id == camera.id)\
-                        .filter(CameraVitalSignsCheck.check_type == 'image_change')\
-                        .order_by(CameraVitalSignsCheck.check_time.desc())\
-                        .first()
+                    # Use provided image paths, or fall back to querying latest check
+                    previous_image = previous_image_path
+                    current_image = current_image_path
 
-                    previous_image = None
-                    current_image = None
+                    if not previous_image or not current_image:
+                        # Fallback: Get image paths from camera's vital signs checks
+                        from models import CameraVitalSignsCheck
+                        latest_check = db.query(CameraVitalSignsCheck)\
+                            .filter(CameraVitalSignsCheck.camera_id == camera.id)\
+                            .filter(CameraVitalSignsCheck.check_type == 'image_change')\
+                            .order_by(CameraVitalSignsCheck.check_time.desc())\
+                            .first()
 
-                    if latest_check:
-                        if latest_check.previous_image_path:
-                            previous_image = latest_check.previous_image_path
-                        if latest_check.current_image_path:
-                            current_image = latest_check.current_image_path
+                        if latest_check:
+                            if not previous_image and latest_check.previous_image_path:
+                                previous_image = latest_check.previous_image_path
+                            if not current_image and latest_check.current_image_path:
+                                current_image = latest_check.current_image_path
 
                     # Send HTML email notifications with image comparison
                     subject = f"⚠️ Camera Image Change Alert - {camera.name}"
@@ -167,11 +175,17 @@ class VitalSignsNotificationService:
                     logger.info(f"No email recipients configured for vital signs notifications on account {camera.id}")
 
                 # Create an alarm event for image change (ONLY ONCE)
+                # Include the PREVIOUS image (baseline) in media_paths so operators can see what changed
+                media_paths = []
+                if previous_image:
+                    media_paths.append(previous_image)
+
                 event = AlarmEvent(
                     camera_id=camera.id,
                     timestamp=datetime.utcnow(),
                     media_type="alert",  # "alert" indicates system-generated vital signs alert
-                    media_paths=[],  # No media for system alerts
+                    alert_type="image_change",  # Specify this is an image change alert
+                    media_paths=media_paths,  # Include previous image for comparison
                     status="pending"
                 )
 

@@ -87,12 +87,32 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
       return !!(details.relay_number || details.tool_type || details.mode || details.webhook_url)
     }
 
+    if (item.action === 'tool_group_triggered') {
+      return !!(details.tools && details.tools.length > 0)
+    }
+
     if (item.action === 'phone_call_parked' || item.action === 'phone_call_retrieved') {
       return !!(details.parked_slot)
     }
 
+    if (item.action === 'action_plan_step_toggled') {
+      return !!(details.action || details.step_type)
+    }
+
+    if (item.action === 'action_plan_question_answered') {
+      return !!(details.answer)
+    }
+
+    if (item.action === 'action_plan_cameras_viewed') {
+      return !!(details.view_type || details.camera_count)
+    }
+
+    if (item.action === 'recording_available') {
+      return !!(details.recording_url)
+    }
+
     const meaningfulKeys = Object.keys(details).filter(key =>
-      !['contact_name', 'phone_number', 'tool_name', 'camera_name', 'call_type', 'tool_id', 'camera_id'].includes(key)
+      !['contact_name', 'phone_number', 'tool_name', 'camera_name', 'call_type', 'tool_id', 'camera_id', 'step_label'].includes(key)
     )
 
     return meaningfulKeys.length > 0
@@ -155,6 +175,8 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
         return <CheckCircle {...iconProps} color="#6b7280" />
       case 'phone_call_initiated':
         return <PhoneCall {...iconProps} color="#3b82f6" />
+      case 'inbound_call_initiated':
+        return <PhoneCall {...iconProps} color="#10b981" />
       case 'phone_call_answered':
         return <PhoneIncoming {...iconProps} color="#10b981" />
       case 'phone_call_missed':
@@ -166,6 +188,8 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
       case 'tool_activated':
       case 'tool_triggered':
         return <Zap {...iconProps} color="#f59e0b" />
+      case 'tool_group_triggered':
+        return <Zap {...iconProps} color="#8b5cf6" />
       case 'camera_switched':
       case 'camera_view_changed':
         return <Camera {...iconProps} color="#8b5cf6" />
@@ -181,6 +205,12 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
         return <Phone {...iconProps} color="#f59e0b" />
       case 'phone_call_retrieved':
         return <PhoneIncoming {...iconProps} color="#10b981" />
+      case 'action_plan_step_toggled':
+        return <CheckCircle {...iconProps} color="#3b82f6" />
+      case 'action_plan_question_answered':
+        return <FileText {...iconProps} color="#8b5cf6" />
+      case 'action_plan_cameras_viewed':
+        return <Camera {...iconProps} color="#10b981" />
       default:
         return <Clock {...iconProps} color="#6b7280" />
     }
@@ -208,6 +238,8 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
         return '#6b7280'
       case 'phone_call_initiated':
         return '#3b82f6'
+      case 'inbound_call_initiated':
+        return '#10b981'
       case 'phone_call_answered':
         return '#10b981'
       case 'phone_call_missed':
@@ -219,6 +251,8 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
       case 'tool_activated':
       case 'tool_triggered':
         return '#f59e0b'
+      case 'tool_group_triggered':
+        return '#8b5cf6'
       case 'camera_switched':
       case 'camera_view_changed':
       case 'view_mode_changed':
@@ -232,6 +266,12 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
       case 'phone_call_parked':
         return '#f59e0b'
       case 'phone_call_retrieved':
+        return '#10b981'
+      case 'action_plan_step_toggled':
+        return '#3b82f6'
+      case 'action_plan_question_answered':
+        return '#8b5cf6'
+      case 'action_plan_cameras_viewed':
         return '#10b981'
       default:
         return '#6b7280'
@@ -267,6 +307,8 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
         return 'Event dismissed as false alarm'
       case 'phone_call_initiated':
         return `Call initiated to ${details.contact_name || details.phone_number || 'contact'}`
+      case 'inbound_call_initiated':
+        return `Called camera: ${details.camera_name || 'Unknown'} (${details.phone_number || 'No number'})`
       case 'phone_call_answered':
         return `Call answered by ${details.contact_name || 'contact'}`
       case 'phone_call_missed':
@@ -290,6 +332,9 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
           return `${details.tool_name} (webhook)`
         }
         return `Tool triggered: ${details.tool_name || 'Unknown tool'}`
+      case 'tool_group_triggered':
+        const toolCount = details.tool_count || details.tools?.length || 0
+        return `Tool Group "${details.tool_group_name}" executed (${toolCount} tool${toolCount !== 1 ? 's' : ''})`
       case 'camera_switched':
         return `Switched to camera: ${details.camera_name || 'Unknown camera'}`
       case 'camera_view_changed':
@@ -306,6 +351,12 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
         return `Call parked in slot ${details.parked_slot || 'unknown'}`
       case 'phone_call_retrieved':
         return `Call retrieved from slot ${details.parked_slot || 'unknown'}`
+      case 'action_plan_step_toggled':
+        return details.step_label || 'Action plan step toggled'
+      case 'action_plan_question_answered':
+        return details.step_label || 'Action plan question answered'
+      case 'action_plan_cameras_viewed':
+        return 'Viewed cameras from action plan'
       default:
         return action.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
     }
@@ -354,13 +405,33 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
       return !!(details.relay_number || details.tool_type || details.mode || details.webhook_url)
     }
 
+    if (item.action === 'tool_group_triggered') {
+      return !!(details.tools && details.tools.length > 0)
+    }
+
     if (item.action === 'phone_call_parked' || item.action === 'phone_call_retrieved') {
       return !!(details.parked_slot)
     }
 
+    if (item.action === 'action_plan_step_toggled') {
+      return !!(details.action || details.step_type)
+    }
+
+    if (item.action === 'action_plan_question_answered') {
+      return !!(details.answer)
+    }
+
+    if (item.action === 'action_plan_cameras_viewed') {
+      return !!(details.view_type || details.camera_count)
+    }
+
+    if (item.action === 'recording_available') {
+      return !!(details.recording_url)
+    }
+
     // Check if details has meaningful content (not just basic identifiers)
     const meaningfulKeys = Object.keys(details).filter(key =>
-      !['contact_name', 'phone_number', 'tool_name', 'camera_name', 'call_type', 'tool_id', 'camera_id'].includes(key)
+      !['contact_name', 'phone_number', 'tool_name', 'camera_name', 'call_type', 'tool_id', 'camera_id', 'step_label'].includes(key)
     )
 
     return meaningfulKeys.length > 0
@@ -482,6 +553,37 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
           lineHeight: '1.5'
         }}>
           {details.note_text}
+        </div>
+      )
+    }
+
+    // Special rendering for recording_available (inbound call recordings)
+    if (item.action === 'recording_available' && details.recording_url) {
+      return (
+        <div style={{
+          marginTop: '0.75rem',
+          padding: '0.75rem',
+          background: '#1e293b',
+          borderRadius: '0.375rem',
+          border: '1px solid #8b5cf6'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+            <Voicemail size={16} color="#8b5cf6" />
+            <span style={{ fontSize: '0.875rem', color: '#e2e8f0', fontWeight: '500' }}>
+              Call Recording
+            </span>
+          </div>
+          <audio
+            controls
+            style={{
+              width: '100%',
+              marginTop: '0.5rem',
+              height: '32px'
+            }}
+          >
+            <source src={details.recording_url} type="audio/mpeg" />
+            Your browser does not support audio playback.
+          </audio>
         </div>
       )
     }
@@ -658,6 +760,172 @@ const AlarmTimeline = ({ alarmId, eventId }) => {
                 fontWeight: '500'
               }}>
                 Result: {details.result}
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    // Special rendering for tool_group_triggered
+    if (item.action === 'tool_group_triggered') {
+      const tools = details.tools || []
+      return (
+        <div style={{
+          marginTop: '0.75rem',
+          padding: '0.75rem',
+          background: '#1e293b',
+          borderRadius: '0.375rem',
+          border: '1px solid #8b5cf6'
+        }}>
+          <div style={{
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            color: '#8b5cf6',
+            marginBottom: '0.75rem'
+          }}>
+            Tool Group Execution Details
+          </div>
+
+          {tools.length === 0 ? (
+            <div style={{ fontSize: '0.875rem', color: '#94a3b8' }}>
+              No tool details available
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {tools.map((tool, index) => (
+                <div
+                  key={index}
+                  style={{
+                    padding: '0.5rem',
+                    background: '#0f172a',
+                    borderRadius: '0.25rem',
+                    border: '1px solid #334155'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                    <Zap size={14} color="#f59e0b" />
+                    <span style={{ fontSize: '0.875rem', color: '#e2e8f0', fontWeight: '500' }}>
+                      {tool.tool_name}
+                    </span>
+                    <span style={{
+                      padding: '0.125rem 0.5rem',
+                      background: '#f59e0b20',
+                      borderRadius: '0.25rem',
+                      color: '#f59e0b',
+                      fontSize: '0.7rem',
+                      fontWeight: '500',
+                      marginLeft: 'auto'
+                    }}>
+                      {tool.tool_type ? tool.tool_type.toUpperCase() : tool.action_type?.toUpperCase()}
+                    </span>
+                  </div>
+                  {tool.relay_number && (
+                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginLeft: '1.25rem' }}>
+                      Relay #{tool.relay_number}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    // Special rendering for action_plan_step_toggled
+    if (item.action === 'action_plan_step_toggled') {
+      return (
+        <div style={{
+          marginTop: '0.75rem',
+          padding: '0.75rem',
+          background: '#1e293b',
+          borderRadius: '0.375rem',
+          border: '1px solid #3b82f6'
+        }}>
+          <div style={{ fontSize: '0.875rem', color: '#cbd5e1' }}>
+            {details.action && (
+              <div style={{
+                padding: '0.5rem',
+                background: details.action === 'checked' ? '#10b98120' : '#ef444420',
+                borderRadius: '0.25rem',
+                border: `1px solid ${details.action === 'checked' ? '#10b981' : '#ef4444'}`,
+                marginBottom: '0.5rem'
+              }}>
+                <span style={{
+                  color: details.action === 'checked' ? '#10b981' : '#ef4444',
+                  fontWeight: '600'
+                }}>
+                  {details.action === 'checked' ? '✓ Checked' : '☐ Unchecked'}
+                </span>
+              </div>
+            )}
+            {details.step_type && (
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                Step type: <span style={{ color: '#e2e8f0' }}>{details.step_type}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    // Special rendering for action_plan_question_answered
+    if (item.action === 'action_plan_question_answered') {
+      return (
+        <div style={{
+          marginTop: '0.75rem',
+          padding: '0.75rem',
+          background: '#1e293b',
+          borderRadius: '0.375rem',
+          border: '1px solid #8b5cf6'
+        }}>
+          <div style={{ fontSize: '0.875rem', color: '#cbd5e1' }}>
+            {details.answer && (
+              <div style={{
+                padding: '0.5rem',
+                background: details.answer === 'YES' ? '#10b98120' : '#ef444420',
+                borderRadius: '0.25rem',
+                border: `1px solid ${details.answer === 'YES' ? '#10b981' : '#ef4444'}`
+              }}>
+                <div style={{
+                  color: details.answer === 'YES' ? '#10b981' : '#ef4444',
+                  fontWeight: '700',
+                  fontSize: '1rem',
+                  textAlign: 'center'
+                }}>
+                  {details.answer}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    // Special rendering for action_plan_cameras_viewed
+    if (item.action === 'action_plan_cameras_viewed') {
+      return (
+        <div style={{
+          marginTop: '0.75rem',
+          padding: '0.75rem',
+          background: '#1e293b',
+          borderRadius: '0.375rem',
+          border: '1px solid #10b981'
+        }}>
+          <div style={{ fontSize: '0.875rem', color: '#cbd5e1' }}>
+            {details.view_type && (
+              <div style={{ marginBottom: '0.5rem' }}>
+                <strong style={{ color: '#94a3b8' }}>View type:</strong>{' '}
+                <span style={{ color: '#10b981', fontWeight: '500' }}>
+                  {details.view_type}
+                </span>
+              </div>
+            )}
+            {details.camera_count && (
+              <div>
+                <strong style={{ color: '#94a3b8' }}>Cameras viewed:</strong>{' '}
+                <span style={{ color: '#e2e8f0' }}>{details.camera_count}</span>
               </div>
             )}
           </div>

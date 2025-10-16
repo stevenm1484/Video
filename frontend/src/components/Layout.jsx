@@ -188,7 +188,10 @@ export default function Layout() {
             <div style={styles.rightNav}>
             {/* Setup Dropdown Menu - Desktop */}
             {hasSetupAccess && (
-              <div style={styles.dropdownContainer}>
+              <div
+                style={styles.dropdownContainer}
+                onMouseLeave={() => setShowSetupDropdown(false)}
+              >
                 <button
                   style={styles.navLink}
                   className="nav-link"
@@ -201,48 +204,47 @@ export default function Layout() {
                 </button>
 
                 {showSetupDropdown && (
-                  <div
-                    style={styles.dropdown}
-                    onMouseLeave={() => setShowSetupDropdown(false)}
-                  >
-                    {isSuperAdmin && (
-                      <>
-                        <Link to="/countries" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
-                          <Globe size={18} />
-                          <span>Countries</span>
-                        </Link>
-                        <Link to="/groups" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
-                          <Layers size={18} />
-                          <span>Groups</span>
-                        </Link>
-                        <Link to="/dealers" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
-                          <Building2 size={18} />
-                          <span>Dealers</span>
-                        </Link>
+                  <div style={styles.dropdown}>
+                    <div style={styles.dropdownInner}>
+                      {isSuperAdmin && (
+                        <>
+                          <Link to="/countries" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
+                            <Globe size={18} />
+                            <span>Countries</span>
+                          </Link>
+                          <Link to="/groups" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
+                            <Layers size={18} />
+                            <span>Groups</span>
+                          </Link>
+                          <Link to="/dealers" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
+                            <Building2 size={18} />
+                            <span>Dealers</span>
+                          </Link>
+                          <Link to="/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
+                            <Shield size={18} />
+                            <span>Users</span>
+                          </Link>
+                        </>
+                      )}
+                      {isGroupAdmin && !isSuperAdmin && (
+                        <>
+                          <Link to="/dealers" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
+                            <Building2 size={18} />
+                            <span>Dealers</span>
+                          </Link>
+                          <Link to="/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
+                            <Shield size={18} />
+                            <span>Users</span>
+                          </Link>
+                        </>
+                      )}
+                      {isDealerAdmin && !isSuperAdmin && !isGroupAdmin && (
                         <Link to="/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
                           <Shield size={18} />
                           <span>Users</span>
                         </Link>
-                      </>
-                    )}
-                    {isGroupAdmin && !isSuperAdmin && (
-                      <>
-                        <Link to="/dealers" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
-                          <Building2 size={18} />
-                          <span>Dealers</span>
-                        </Link>
-                        <Link to="/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
-                          <Shield size={18} />
-                          <span>Users</span>
-                        </Link>
-                      </>
-                    )}
-                    {isDealerAdmin && !isSuperAdmin && !isGroupAdmin && (
-                      <Link to="/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowSetupDropdown(false)}>
-                        <Shield size={18} />
-                        <span>Users</span>
-                      </Link>
-                    )}
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -250,7 +252,10 @@ export default function Layout() {
 
             {/* Status Dropdown Menu - Desktop - Only show for non-restricted users */}
             {!isRestrictedLevel && (
-              <div style={styles.dropdownContainer}>
+              <div
+                style={styles.dropdownContainer}
+                onMouseLeave={() => setShowStatusDropdown(false)}
+              >
                 <button
                   style={styles.navLink}
                   className="nav-link"
@@ -263,40 +268,39 @@ export default function Layout() {
                 </button>
 
                 {showStatusDropdown && (
-                  <div
-                    style={styles.dropdown}
-                    onMouseLeave={() => setShowStatusDropdown(false)}
-                  >
-                    <Link to="/status/overall" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                      <BarChart3 size={18} />
-                      <span>Overall Status</span>
-                    </Link>
-                    <Link to="/status/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                      <Users size={18} />
-                      <span>User Dashboard</span>
-                    </Link>
-                    <Link to="/status/pending" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                      <Clock size={18} />
-                      <span>Pending Status</span>
-                    </Link>
-                    <Link to="/status/on-hold" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                      <Pause size={18} />
-                      <span>On Hold Status</span>
-                    </Link>
-                    <Link to="/status/vital-signs" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                      <Activity size={18} />
-                      <span>Vital Signs</span>
-                    </Link>
-                    <Link to="/status/event-log" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                      <FileText size={18} />
-                      <span>Event Log</span>
-                    </Link>
-                    {isSuperAdmin && (
-                      <Link to="/system-health" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
-                        <Activity size={18} />
-                        <span>System Health</span>
+                  <div style={styles.dropdown}>
+                    <div style={styles.dropdownInner}>
+                      <Link to="/status/overall" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                        <BarChart3 size={18} />
+                        <span>Overall Status</span>
                       </Link>
-                    )}
+                      <Link to="/status/users" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                        <Users size={18} />
+                        <span>User Dashboard</span>
+                      </Link>
+                      <Link to="/status/pending" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                        <Clock size={18} />
+                        <span>Pending Status</span>
+                      </Link>
+                      <Link to="/status/on-hold" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                        <Pause size={18} />
+                        <span>On Hold Status</span>
+                      </Link>
+                      <Link to="/status/vital-signs" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                        <Activity size={18} />
+                        <span>Vital Signs</span>
+                      </Link>
+                      <Link to="/status/event-log" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                        <FileText size={18} />
+                        <span>Event Log</span>
+                      </Link>
+                      {isSuperAdmin && (
+                        <Link to="/system-health" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                          <Activity size={18} />
+                          <span>System Health</span>
+                        </Link>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -582,13 +586,17 @@ const styles = {
     position: 'absolute',
     top: '100%',
     left: 0,
-    marginTop: '0.5rem',
+    marginTop: '0',
+    paddingTop: '0.5rem',
+    background: 'transparent',
+    minWidth: '180px',
+    zIndex: 1000
+  },
+  dropdownInner: {
     background: '#1e293b',
     border: '1px solid #334155',
     borderRadius: '0.5rem',
     boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)',
-    minWidth: '180px',
-    zIndex: 1000,
     overflow: 'hidden'
   },
   dropdownItem: {

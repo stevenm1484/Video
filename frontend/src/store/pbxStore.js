@@ -162,7 +162,7 @@ export const usePBXStore = create((set, get) => ({
   },
 
   // Make outbound call
-  makeCall: (phoneNumber, pbxConfig, eventHandlers = null) => {
+  makeCall: (phoneNumber, pbxConfig, eventHandlers = null, trackingId = null) => {
     const { ua, isRegistered } = get()
 
     if (!ua || !isRegistered) {
@@ -193,6 +193,20 @@ export const usePBXStore = create((set, get) => ({
         offerToReceiveAudio: true,
         offerToReceiveVideo: false
       }
+    }
+
+    // Add custom SIP headers with tracking ID if provided
+    if (trackingId) {
+      const trackingParts = trackingId.split('-') // VM-alarmId-eventId-timestamp
+      const alarmId = trackingParts[1] || ''
+      const eventId = trackingParts[2] || ''
+
+      options.extraHeaders = [
+        `X-VM-Tracking-ID: ${trackingId}`,
+        `X-VM-Alarm-ID: ${alarmId}`,
+        `X-VM-Event-ID: ${eventId}`
+      ]
+      console.log('[PBX] Adding tracking headers:', options.extraHeaders)
     }
 
     // Add event handlers if provided (critical for proper audio handling)

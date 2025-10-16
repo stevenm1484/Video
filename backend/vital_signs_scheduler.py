@@ -147,7 +147,12 @@ class VitalSignsScheduler:
 
                         # Send alert if not already sent
                         if status and not status.image_change_alert_sent:
-                            await self.notification_service.send_image_change_alert(db, camera, status)
+                            # Pass the exact image paths from the check that triggered the alert
+                            await self.notification_service.send_image_change_alert(
+                                db, camera, status,
+                                previous_image_path=check.previous_image_path,
+                                current_image_path=check.current_image_path
+                            )
                             # Mark alert as sent
                             status.image_change_alert_sent = True
                             status.image_change_alert_sent_at = datetime.utcnow()
@@ -245,8 +250,20 @@ class VitalSignsScheduler:
                 # Check image change issues
                 if check_type in ["image_change", "both"]:
                     if status.image_change_status == "changed":
-                        # Send alert for image change
-                        await self.notification_service.send_image_change_alert(db, camera, status)
+                        # Get the latest image change check to pass exact image paths
+                        from models import CameraVitalSignsCheck
+                        latest_check = db.query(CameraVitalSignsCheck)\
+                            .filter(CameraVitalSignsCheck.camera_id == camera_id)\
+                            .filter(CameraVitalSignsCheck.check_type == 'image_change')\
+                            .order_by(CameraVitalSignsCheck.check_time.desc())\
+                            .first()
+
+                        # Send alert for image change with exact image paths from the check
+                        await self.notification_service.send_image_change_alert(
+                            db, camera, status,
+                            previous_image_path=latest_check.previous_image_path if latest_check else None,
+                            current_image_path=latest_check.current_image_path if latest_check else None
+                        )
                         # Mark alert as sent
                         status.image_change_alert_sent = True
                         status.image_change_alert_sent_at = datetime.utcnow()

@@ -173,11 +173,11 @@ export default function AccountsLookup() {
           <table style={styles.table}>
             <thead style={styles.thead}>
               <tr>
-                <th style={styles.th}>Group</th>
                 <th style={styles.th}>Dealer</th>
                 <th style={styles.th}>Account Number</th>
                 <th style={styles.th}>Name</th>
                 <th style={styles.th}>Address</th>
+                <th style={styles.th}>Video Type</th>
                 <th style={{...styles.th, textAlign: 'right'}}>Actions</th>
               </tr>
             </thead>
@@ -195,7 +195,6 @@ export default function AccountsLookup() {
                     style={styles.tr}
                     onClick={() => navigate(`/accounts/${account.id}`)}
                   >
-                    <td style={styles.td}>{getGroupName(account)}</td>
                     <td style={styles.td}>{getDealerName(account)}</td>
                     <td style={{...styles.td, fontWeight: '600', color: '#e2e8f0'}}>
                       {account.account_number || '-'}
@@ -204,18 +203,10 @@ export default function AccountsLookup() {
                       {account.name}
                     </td>
                     <td style={styles.td}>
-                      {account.address ? (
-                        <div>
-                          <div>{account.address}</div>
-                          {(account.city || account.state || account.zip_code) && (
-                            <div style={styles.addressSubtext}>
-                              {[account.city, account.state, account.zip_code].filter(Boolean).join(', ')}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        '-'
-                      )}
+                      {account.address || '-'}
+                    </td>
+                    <td style={styles.td}>
+                      {account.video_type || '-'}
                     </td>
                     <td style={{...styles.td, textAlign: 'right'}}>
                       <button
@@ -377,7 +368,7 @@ const styles = {
     transition: 'background 0.2s'
   },
   td: {
-    padding: '1rem 1.5rem',
+    padding: '0.5rem 1rem',
     fontSize: '0.875rem',
     color: '#cbd5e1',
     whiteSpace: 'nowrap'
@@ -386,11 +377,6 @@ const styles = {
     padding: '2rem 1.5rem',
     textAlign: 'center',
     color: '#94a3b8'
-  },
-  addressSubtext: {
-    fontSize: '0.75rem',
-    color: '#94a3b8',
-    marginTop: '0.25rem'
   },
   viewBtn: {
     display: 'inline-flex',

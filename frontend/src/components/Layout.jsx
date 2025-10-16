@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { Outlet, Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/authStore'
 import { usePBXStore } from '../store/pbxStore'
-import { Video, Users, LogOut, Home, History, Shield, Globe, Layers, Building2, Settings, ChevronDown, Menu, X, Activity, BarChart3, Clock, Pause, FileText, Phone, PhoneOff, Monitor } from 'lucide-react'
+import { Video, Users, LogOut, Home, History, Shield, Globe, Layers, Building2, Settings, ChevronDown, Menu, X, Activity, BarChart3, Clock, Pause, FileText, Phone, PhoneOff, Monitor, DollarSign } from 'lucide-react'
 import axios from 'axios'
 
 export default function Layout() {
@@ -173,6 +173,10 @@ export default function Layout() {
                 <FileText size={20} />
                 <span>Reports</span>
               </Link>
+              <Link to="/billing-report" style={styles.navLink} className="nav-link">
+                <DollarSign size={20} />
+                <span>Billing</span>
+              </Link>
               {isRestrictedLevel && (
                 <Link to="/status/vital-signs" style={styles.navLink} className="nav-link">
                   <Activity size={20} />
@@ -283,6 +287,10 @@ export default function Layout() {
                       <Activity size={18} />
                       <span>Vital Signs</span>
                     </Link>
+                    <Link to="/status/event-log" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
+                      <FileText size={18} />
+                      <span>Event Log</span>
+                    </Link>
                     {isSuperAdmin && (
                       <Link to="/system-health" style={styles.dropdownItem} className="dropdown-item" onClick={() => setShowStatusDropdown(false)}>
                         <Activity size={18} />
@@ -362,6 +370,10 @@ export default function Layout() {
               <FileText size={20} />
               <span>Reports</span>
             </Link>
+            <Link to="/billing-report" style={styles.mobileNavLink} className="nav-link" onClick={closeMobileMenu}>
+              <DollarSign size={20} />
+              <span>Billing</span>
+            </Link>
             {isRestrictedLevel && (
               <Link to="/status/vital-signs" style={styles.mobileNavLink} className="nav-link" onClick={closeMobileMenu}>
                 <Activity size={20} />
@@ -392,6 +404,10 @@ export default function Layout() {
                 <Link to="/status/vital-signs" style={styles.mobileNavLink} className="nav-link" onClick={closeMobileMenu}>
                   <Activity size={18} />
                   <span>Vital Signs</span>
+                </Link>
+                <Link to="/status/event-log" style={styles.mobileNavLink} className="nav-link" onClick={closeMobileMenu}>
+                  <FileText size={18} />
+                  <span>Event Log</span>
                 </Link>
                 {isSuperAdmin && (
                   <Link to="/system-health" style={styles.mobileNavLink} className="nav-link" onClick={closeMobileMenu}>

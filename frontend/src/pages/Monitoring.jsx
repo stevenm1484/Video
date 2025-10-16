@@ -666,6 +666,20 @@ function ActiveEventCard({ group, currentUser, onReload }) {
         videoRef.current.addEventListener('playing', () => {
           console.log('[LiveStream] Video is now playing')
           setStreamLoading(false)
+
+          // Start capturing after stream is confirmed playing (5 second delay to ensure RTSP is stable)
+          setTimeout(() => {
+            if (selectedEvent && selectedEvent.id) {
+              console.log(`[Monitoring] Starting capture for event ${selectedEvent.id}, camera ${cameraId}`)
+              api.post(`/events/${selectedEvent.id}/start-capture`, null, {
+                params: {
+                  camera_id: cameraId
+                }
+              }).catch(err => {
+                console.error('[Monitoring] Failed to start capture:', err)
+              })
+            }
+          }, 5000)
         }, { once: true })
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
@@ -690,6 +704,20 @@ function ActiveEventCard({ group, currentUser, onReload }) {
         videoRef.current.addEventListener('playing', () => {
           console.log('[LiveStream] Video is now playing')
           setStreamLoading(false)
+
+          // Start capturing after stream is confirmed playing (5 second delay to ensure RTSP is stable)
+          setTimeout(() => {
+            if (selectedEvent && selectedEvent.id) {
+              console.log(`[Monitoring] Starting capture for event ${selectedEvent.id}, camera ${cameraId}`)
+              api.post(`/events/${selectedEvent.id}/start-capture`, null, {
+                params: {
+                  camera_id: cameraId
+                }
+              }).catch(err => {
+                console.error('[Monitoring] Failed to start capture:', err)
+              })
+            }
+          }, 5000)
         }, { once: true })
 
         videoRef.current.addEventListener('loadedmetadata', () => {
@@ -739,6 +767,15 @@ function ActiveEventCard({ group, currentUser, onReload }) {
     }
 
     try {
+      // Stop capture before dismissing
+      if (selectedEvent && selectedEvent.camera_id) {
+        await api.post(`/events/${selectedEvent.id}/stop-capture`, null, {
+          params: {
+            camera_id: selectedEvent.camera_id
+          }
+        }).catch(err => console.error('Failed to stop capture:', err))
+      }
+
       for (const event of group.events) {
         if (event.type === 'alarm' && event.alarm_id) {
           await api.put(`/alarms/${event.alarm_id}/resolve`, {
@@ -797,6 +834,15 @@ function ActiveEventCard({ group, currentUser, onReload }) {
 
   const handleConfirmEscalate = async () => {
     try {
+      // Stop capture before escalating
+      if (selectedEvent && selectedEvent.camera_id) {
+        await api.post(`/events/${selectedEvent.id}/stop-capture`, null, {
+          params: {
+            camera_id: selectedEvent.camera_id
+          }
+        }).catch(err => console.error('Failed to stop capture:', err))
+      }
+
       const notesToSend = escalateNotes.trim() || undefined
       await api.put(`/events/${selectedEvent.id}/escalate`, {
         notes: notesToSend

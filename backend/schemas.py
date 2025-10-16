@@ -408,6 +408,8 @@ class AlarmEventResponse(BaseModel):
     call_status: Optional[str] = None
     call_retrieved_at: Optional[datetime] = None
     call_retrieved_by: Optional[int] = None
+    # Live view captures - recordings made when user views live stream during event
+    live_view_captures: Optional[List[Dict[str, Any]]] = []
 
     @field_validator('media_paths', mode='before')
     @classmethod
@@ -428,6 +430,17 @@ class AlarmEventResponse(BaseModel):
     @field_validator('eyes_on_users', mode='before')
     @classmethod
     def parse_eyes_on_users(cls, v):
+        # If it's a JSON string, parse it
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except:
+                return []
+        return v or []
+
+    @field_validator('live_view_captures', mode='before')
+    @classmethod
+    def parse_live_view_captures(cls, v):
         # If it's a JSON string, parse it
         if isinstance(v, str):
             try:

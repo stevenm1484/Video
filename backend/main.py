@@ -4,7 +4,7 @@ import os
 # Load environment variables from .env file BEFORE any other imports
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +52,10 @@ import time
 import hmac
 import hashlib
 import base64
+from typing import Dict, Tuple
+
+# Track active capture processes: (event_id, camera_id) -> (process, start_time, output_path)
+active_captures: Dict[Tuple[int, int], Tuple[asyncio.subprocess.Process, datetime, str]] = {}
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -2760,21 +2764,19 @@ async def capture_snapshot(
     else:
         raise HTTPException(status_code=500, detail="Failed to capture snapshot")
 
-@app.post("/api/events/{event_id}/capture-live-view")
-async def capture_live_view_for_event(
+@app.post("/api/events/{event_id}/start-capture")
+async def start_capture_for_event(
     event_id: int,
     camera_id: int,
-    duration_seconds: int = 10,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Capture a live view clip from a camera during an alarm event"""
-    # Validate event exists
+    """Start capturing live view from a camera - records until stop-capture is called"""
+    # Validation
     event = db.query(AlarmEvent).filter(AlarmEvent.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # Validate camera exists
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -2782,102 +2784,126 @@ async def capture_live_view_for_event(
     if not camera.rtsp_url:
         raise HTTPException(status_code=400, detail="Camera has no RTSP URL configured")
 
-    # Limit duration to reasonable range (5-30 seconds)
-    duration_seconds = max(5, min(duration_seconds, 30))
+    capture_key = (event_id, camera_id)
 
-    # Build RTSP URL with credentials
+    # Check if already capturing
+    if capture_key in active_captures:
+        return {
+            "message": "Capture already in progress",
+            "event_id": event_id,
+            "camera_id": camera_id,
+            "started_at": active_captures[capture_key][1].isoformat()
+        }
+
+    # Start capture process
     rtsp_url = build_rtsp_url_with_credentials(camera)
-
-    # Create output directory
-    output_dir = "uploads/live_captures"
+    output_dir = "/mnt/media/uploads/live_captures"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Generate unique filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_filename = f"event_{event_id}_camera_{camera_id}_{timestamp}.mp4"
     output_path = os.path.join(output_dir, output_filename)
 
-    # Capture video clip using ffmpeg
+    # No -t flag - capture until we kill the process
+    cmd = [
+        "/usr/local/bin/ffmpeg",
+        "-rtsp_transport", "tcp",
+        "-i", rtsp_url,
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-y",
+        output_path
+    ]
+
+    logger.info(f"Starting continuous capture from camera {camera_id} for event {event_id}")
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    # Store process info
+    start_time = datetime.now()
+    active_captures[capture_key] = (process, start_time, output_path, current_user.id)
+
+    return {
+        "message": "Capture started",
+        "event_id": event_id,
+        "camera_id": camera_id,
+        "started_at": start_time.isoformat()
+    }
+
+@app.post("/api/events/{event_id}/stop-capture")
+async def stop_capture_for_event(
+    event_id: int,
+    camera_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Stop capturing and save the video to the event"""
+    capture_key = (event_id, camera_id)
+
+    if capture_key not in active_captures:
+        raise HTTPException(status_code=404, detail="No active capture found for this event/camera")
+
+    process, start_time, output_path, user_id = active_captures[capture_key]
+
+    # Terminate the ffmpeg process gracefully
     try:
-        import subprocess
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
 
-        # Use ffmpeg to capture clip from RTSP stream
-        # -rtsp_transport tcp: Use TCP for more reliable connection
-        # -i: Input RTSP URL
-        # -t: Duration in seconds
-        # -c:v: Video codec (copy = direct stream copy, faster)
-        # -c:a: Audio codec (copy = direct stream copy)
-        cmd = [
-            "/usr/local/bin/ffmpeg",
-            "-rtsp_transport", "tcp",
-            "-i", rtsp_url,
-            "-t", str(duration_seconds),
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-y",  # Overwrite output file if exists
-            output_path
-        ]
+    # Remove from active captures
+    del active_captures[capture_key]
 
-        logger.info(f"Capturing {duration_seconds}s clip from camera {camera_id} for event {event_id}")
+    # Calculate duration
+    end_time = datetime.now()
+    duration_seconds = int((end_time - start_time).total_seconds())
 
-        # Run ffmpeg with timeout
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+    logger.info(f"Stopped capture for camera {camera_id} event {event_id}, duration: {duration_seconds}s")
 
-        try:
-            # Wait for capture to complete (with timeout = duration + 10s buffer)
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=duration_seconds + 10
-            )
+    # Check if file exists and has content
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        event = db.query(AlarmEvent).filter(AlarmEvent.id == event_id).first()
+        camera = db.query(Camera).filter(Camera.id == camera_id).first()
 
-            if process.returncode != 0:
-                error_msg = stderr.decode('utf-8') if stderr else "Unknown error"
-                logger.error(f"FFmpeg capture failed: {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Failed to capture video: {error_msg}")
+        relative_path = output_path.replace("/mnt/media/", "")
+        capture_info = {
+            "camera_id": camera_id,
+            "camera_name": camera.name,
+            "view_start": start_time.isoformat(),
+            "view_end": end_time.isoformat(),
+            "clip_path": relative_path,
+            "duration_seconds": duration_seconds,
+            "captured_by": user_id
+        }
 
-            # Verify file was created and has content
-            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                raise HTTPException(status_code=500, detail="Capture file not created or empty")
+        # Update database
+        if event.live_view_captures is None:
+            captures = []
+        else:
+            captures = list(event.live_view_captures)
 
-            # Add capture info to event's live_view_captures array
-            capture_info = {
-                "camera_id": camera_id,
-                "camera_name": camera.name,
-                "capture_timestamp": datetime.utcnow().isoformat(),
-                "clip_path": output_path,
-                "duration_seconds": duration_seconds,
-                "captured_by": current_user.id
-            }
+        captures.append(capture_info)
+        event.live_view_captures = captures
+        db.commit()
 
-            # Update event's live_view_captures
-            if event.live_view_captures is None:
-                event.live_view_captures = []
+        logger.info(f"Live view capture saved: {output_path} ({duration_seconds}s)")
 
-            event.live_view_captures.append(capture_info)
-            db.commit()
-
-            logger.info(f"Live view capture saved: {output_path}")
-
-            return {
-                "message": "Live view captured successfully",
-                "clip_url": f"/{output_path}",
-                "duration_seconds": duration_seconds,
-                "capture_info": capture_info
-            }
-
-        except asyncio.TimeoutError:
-            # Kill the process if it's taking too long
-            process.kill()
-            await process.wait()
-            raise HTTPException(status_code=500, detail="Capture timeout")
-
-    except Exception as e:
-        logger.error(f"Error capturing live view: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to capture live view: {str(e)}")
+        return {
+            "message": "Capture stopped and saved",
+            "event_id": event_id,
+            "camera_id": camera_id,
+            "duration_seconds": duration_seconds,
+            "file_path": relative_path
+        }
+    else:
+        logger.error(f"Capture file missing or empty: {output_path}")
+        raise HTTPException(status_code=500, detail="Capture file missing or empty")
 
 # Snooze endpoints
 @app.post("/api/cameras/{camera_id}/snooze", response_model=SnoozeResponse)

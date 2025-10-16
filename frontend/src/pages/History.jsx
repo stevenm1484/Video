@@ -385,7 +385,7 @@ function HistoryRow({ alarm, navigate, onViewMedia }) {
           )}
           {alarm.alarm_id && (
             <button
-              onClick={() => navigate(`/alarm/${alarm.alarm_id}`, { state: { fromHistory: true } })}
+              onClick={() => navigate(`/alarm-history/${alarm.alarm_id}`)}
               style={styles.viewBtn}
             >
               <Eye size={14} />

@@ -4,7 +4,7 @@ import { toast } from 'react-toastify'
 import api from '../api/axios'
 import ToolGroupsManager from './ToolGroupsManager'
 
-export default function ToolsManager({ accountId, onRelayTriggered, readOnly = false, showSubTabs = false }) {
+export default function ToolsManager({ accountId, alarmId, eventId, onRelayTriggered, readOnly = false, showSubTabs = false }) {
   const [tools, setTools] = useState([])
   const [toolGroups, setToolGroups] = useState([])
   const [loading, setLoading] = useState(true)
@@ -41,7 +41,12 @@ export default function ToolsManager({ accountId, onRelayTriggered, readOnly = f
 
   const handleExecuteToolGroup = async (toolGroup) => {
     try {
-      const response = await api.post(`/tool-groups/${toolGroup.id}/execute`)
+      // Add alarm_id and event_id for audit logging
+      let params = ''
+      if (alarmId && eventId) {
+        params = `?alarm_id=${alarmId}&event_id=${eventId}`
+      }
+      const response = await api.post(`/tool-groups/${toolGroup.id}/execute${params}`)
       toast.success(response.data.message || 'Tool group executed successfully')
 
       // Check if any result has camera view data
@@ -93,6 +98,10 @@ export default function ToolsManager({ accountId, onRelayTriggered, readOnly = f
         if (state !== null) {
           params += `&state=${state}`
         }
+      }
+      // Add alarm_id and event_id for audit logging
+      if (alarmId && eventId) {
+        params += (params ? '&' : '?') + `alarm_id=${alarmId}&event_id=${eventId}`
       }
       const response = await api.post(`/tools/${tool.id}/trigger${params}`)
       toast.success(response.data.message || 'Tool triggered successfully')

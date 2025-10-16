@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { toast } from 'react-toastify'
 import {
   ArrowLeft, Edit, Save, X, Plus, Trash2, Camera as CameraIcon,
-  Eye, Copy, Grid, ListChecks, Bell, BellOff, Clock, Shield, ShieldOff, RotateCcw, Phone
+  Eye, Copy, Grid, ListChecks, Bell, BellOff, Clock, Shield, ShieldOff, RotateCcw, Phone, Activity
 } from 'lucide-react'
 import api from '../api/axios'
 import ActionPlanTree from '../components/ActionPlanTree'
@@ -36,6 +36,7 @@ export default function AccountDetail() {
   const [showAddCameraModal, setShowAddCameraModal] = useState(false)
   const [showEditCameraModal, setShowEditCameraModal] = useState(false)
   const [selectedCamera, setSelectedCamera] = useState(null)
+  const [showCameraActivityModal, setShowCameraActivityModal] = useState(false)
   const [showActionPlanModal, setShowActionPlanModal] = useState(false)
   const [showLiveViewModal, setShowLiveViewModal] = useState(false)
   const [liveViewCamera, setLiveViewCamera] = useState(null)
@@ -511,6 +512,10 @@ export default function AccountDetail() {
               setSelectedCamera(camera)
               setShowEditCameraModal(true)
             }}
+            onViewCameraActivity={(camera) => {
+              setSelectedCamera(camera)
+              setShowCameraActivityModal(true)
+            }}
             onCopyCamera={(camera) => {
               // Copy camera and open it in the add modal with pre-filled data
               setSelectedCamera({
@@ -635,6 +640,18 @@ export default function AccountDetail() {
             setSelectedCamera(null)
             loadAccountData()
           }}
+        />
+      )}
+
+      {showCameraActivityModal && selectedCamera && (
+        <CameraActivityModal
+          camera={selectedCamera}
+          account={account}
+          onClose={() => {
+            setShowCameraActivityModal(false)
+            setSelectedCamera(null)
+          }}
+          onUpdate={loadAccountData}
         />
       )}
 
@@ -1179,7 +1196,7 @@ function FormFieldSelect({ label, value, isEditing, onChange, options, placehold
 }
 
 // Cameras Tab Component
-function CamerasTab({ account, cameras, snapshots, loadingSnapshots, onAddCamera, onEditCamera, onCopyCamera, onDeleteCamera, onRefreshSnapshot, onOpenLiveView, onStartAll }) {
+function CamerasTab({ account, cameras, snapshots, loadingSnapshots, onAddCamera, onEditCamera, onViewCameraActivity, onCopyCamera, onDeleteCamera, onRefreshSnapshot, onOpenLiveView, onStartAll }) {
   if (!account || account.id === undefined) {
     return (
       <div style={styles.card}>
@@ -1280,6 +1297,9 @@ function CamerasTab({ account, cameras, snapshots, loadingSnapshots, onAddCamera
                   <h3 style={styles.cameraName}>{camera.name}</h3>
                 </div>
                 <div style={styles.cameraActions}>
+                  <button onClick={() => onViewCameraActivity(camera)} style={styles.iconBtn} title="Activity & Billing">
+                    <Activity size={16} />
+                  </button>
                   <button onClick={() => onCopyCamera(camera)} style={styles.iconBtn} title="Copy camera with RTSP credentials">
                     <Copy size={16} />
                   </button>
@@ -4703,4 +4723,28 @@ const styles = {
     color: '#e2e8f0',
     marginBottom: '0.75rem'
   }
+}
+
+// Camera Activity Modal Component
+function CameraActivityModal({ camera, account, onClose, onUpdate }) {
+  return (
+    <div style={styles.modalOverlay}>
+      <div style={{...styles.modal, maxWidth: '900px'}}>
+        <div style={styles.modalHeader}>
+          <h2 style={styles.modalTitle}>Activity & Billing - {camera.name}</h2>
+          <button onClick={onClose} style={styles.modalClose}>
+            <X size={24} />
+          </button>
+        </div>
+
+        <div style={{padding: '0 1.5rem 1.5rem'}}>
+          <ActivityThresholds
+            entityType="camera"
+            entityId={camera.id}
+            onUpdate={onUpdate}
+          />
+        </div>
+      </div>
+    </div>
+  )
 }

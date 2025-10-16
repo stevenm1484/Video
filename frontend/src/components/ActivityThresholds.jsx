@@ -362,11 +362,12 @@ export default function ActivityThresholds({
 
 const styles = {
   container: {
-    backgroundColor: 'white',
+    backgroundColor: '#1e293b',
     borderRadius: '8px',
     padding: '24px',
-    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-    marginBottom: '24px'
+    boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+    marginBottom: '24px',
+    border: '1px solid #334155'
   },
   header: {
     display: 'flex',
@@ -382,15 +383,16 @@ const styles = {
   title: {
     fontSize: '20px',
     fontWeight: 600,
-    margin: 0
+    margin: 0,
+    color: '#e2e8f0'
   },
   autoSnoozedBadge: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
     padding: '8px 16px',
-    backgroundColor: '#fef3c7',
-    color: '#92400e',
+    backgroundColor: '#78350f',
+    color: '#fef3c7',
     borderRadius: '6px',
     fontSize: '14px',
     fontWeight: 600
@@ -398,7 +400,7 @@ const styles = {
   loading: {
     textAlign: 'center',
     padding: '40px',
-    color: '#6b7280'
+    color: '#94a3b8'
   },
   statsGrid: {
     display: 'grid',
@@ -408,24 +410,24 @@ const styles = {
   },
   statCard: {
     padding: '16px',
-    backgroundColor: '#f9fafb',
+    backgroundColor: '#0f172a',
     borderRadius: '8px',
-    border: '1px solid #e5e7eb'
+    border: '1px solid #334155'
   },
   statLabel: {
     fontSize: '13px',
-    color: '#6b7280',
+    color: '#94a3b8',
     marginBottom: '8px',
     fontWeight: 500
   },
   statValue: {
     fontSize: '28px',
     fontWeight: 700,
-    color: '#111827'
+    color: '#e2e8f0'
   },
   statSubtext: {
     fontSize: '12px',
-    color: '#9ca3af',
+    color: '#64748b',
     marginTop: '4px'
   },
   progressSection: {
@@ -435,13 +437,13 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     fontSize: '14px',
-    color: '#4b5563',
+    color: '#cbd5e1',
     marginBottom: '8px'
   },
   progressBar: {
     width: '100%',
     height: '12px',
-    backgroundColor: '#e5e7eb',
+    backgroundColor: '#334155',
     borderRadius: '6px',
     overflow: 'hidden'
   },
@@ -455,34 +457,34 @@ const styles = {
     alignItems: 'flex-start',
     gap: '12px',
     padding: '16px',
-    backgroundColor: '#fef3c7',
-    border: '1px solid #fbbf24',
+    backgroundColor: '#78350f',
+    border: '1px solid #f59e0b',
     borderRadius: '8px',
     marginBottom: '16px',
-    color: '#92400e'
+    color: '#fbbf24'
   },
   snoozeAlert: {
     display: 'flex',
     alignItems: 'flex-start',
     gap: '12px',
     padding: '16px',
-    backgroundColor: '#fee2e2',
+    backgroundColor: '#7f1d1d',
     border: '1px solid #ef4444',
     borderRadius: '8px',
     marginBottom: '16px',
-    color: '#991b1b'
+    color: '#fca5a5'
   },
   infoBox: {
     padding: '12px 16px',
-    backgroundColor: '#eff6ff',
+    backgroundColor: '#1e3a5f',
     border: '1px solid #3b82f6',
     borderRadius: '6px',
     fontSize: '14px',
-    color: '#1e40af',
+    color: '#93c5fd',
     marginBottom: '16px'
   },
   editSection: {
-    borderTop: '1px solid #e5e7eb',
+    borderTop: '1px solid #334155',
     paddingTop: '24px',
     marginTop: '24px'
   },
@@ -495,7 +497,8 @@ const styles = {
   subsectionTitle: {
     fontSize: '16px',
     fontWeight: 600,
-    margin: 0
+    margin: 0,
+    color: '#e2e8f0'
   },
   editButton: {
     display: 'flex',
@@ -523,20 +526,22 @@ const styles = {
     display: 'block',
     fontSize: '14px',
     fontWeight: 500,
-    color: '#374151',
+    color: '#cbd5e1',
     marginBottom: '8px'
   },
   input: {
     width: '100%',
     padding: '10px 12px',
-    border: '1px solid #d1d5db',
+    border: '1px solid #334155',
     borderRadius: '6px',
     fontSize: '14px',
-    boxSizing: 'border-box'
+    boxSizing: 'border-box',
+    backgroundColor: '#0f172a',
+    color: '#e2e8f0'
   },
   inputHelp: {
     fontSize: '12px',
-    color: '#6b7280',
+    color: '#94a3b8',
     marginTop: '4px'
   },
   buttonRow: {
@@ -555,16 +560,16 @@ const styles = {
   },
   cancelButton: {
     padding: '10px 20px',
-    backgroundColor: '#f3f4f6',
-    color: '#374151',
-    border: '1px solid #d1d5db',
+    backgroundColor: '#334155',
+    color: '#e2e8f0',
+    border: '1px solid #475569',
     borderRadius: '6px',
     fontSize: '14px',
     fontWeight: 500,
     cursor: 'pointer'
   },
   unsnoozeSection: {
-    borderTop: '1px solid #e5e7eb',
+    borderTop: '1px solid #334155',
     paddingTop: '24px',
     marginTop: '24px'
   },
@@ -585,8 +590,9 @@ const styles = {
   accountStatsBox: {
     marginTop: '24px',
     padding: '16px',
-    backgroundColor: '#f9fafb',
+    backgroundColor: '#0f172a',
     borderRadius: '8px',
-    border: '1px solid #e5e7eb'
+    border: '1px solid #334155',
+    color: '#cbd5e1'
   }
 }

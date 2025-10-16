@@ -232,6 +232,71 @@ export default function Dashboard() {
           </table>
         </div>
       </div>
+
+      {/* Auto-Snoozed Accounts Section */}
+      {stats.auto_snoozed_accounts && stats.auto_snoozed_accounts.length > 0 && (
+        <div style={styles.section}>
+          <h2 style={styles.sectionTitle}>
+            Auto-Snoozed Accounts (Activity Threshold Reached)
+            <span style={{...styles.countBadge, background: '#f59e0b'}}>{stats.auto_snoozed_accounts.length}</span>
+          </h2>
+          <div style={styles.tableContainer}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Account</th>
+                  <th style={styles.th}>Monthly Events</th>
+                  <th style={styles.th}>Threshold</th>
+                  <th style={styles.th}>Auto-Snoozed At</th>
+                  <th style={styles.th}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.auto_snoozed_accounts.map((account) => (
+                  <tr
+                    key={account.account_id}
+                    style={styles.tr}
+                    onClick={() => navigate(`/accounts/${account.account_id}`)}
+                  >
+                    <td style={styles.td}>
+                      <div style={styles.accountCell}>
+                        <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+                          <BellOff size={16} color="#f59e0b" />
+                          <div style={styles.accountName}>{account.account_name}</div>
+                        </div>
+                        <div style={styles.accountNumber}>{account.account_number}</div>
+                      </div>
+                    </td>
+                    <td style={styles.td}>
+                      <span style={{...styles.badge, background: '#ef4444'}}>{account.monthly_event_count}</span>
+                    </td>
+                    <td style={styles.td}>
+                      <span style={{...styles.badge, background: '#f59e0b'}}>{account.activity_snooze_threshold}</span>
+                    </td>
+                    <td style={styles.td}>
+                      <div style={styles.dateCell}>
+                        <Clock size={14} />
+                        <span>{new Date(account.activity_auto_snoozed_at).toLocaleString()}</span>
+                      </div>
+                    </td>
+                    <td style={styles.td}>
+                      <button
+                        style={{...styles.viewBtn, background: '#f59e0b'}}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          navigate(`/accounts/${account.account_id}`)
+                        }}
+                      >
+                        Unsnooze
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

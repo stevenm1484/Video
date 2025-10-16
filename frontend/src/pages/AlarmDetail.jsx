@@ -70,6 +70,7 @@ export default function AlarmDetail() {
   const wsRef = useRef(null)
   const autoDialedRef = useRef(false) // Track if we've already auto-dialed
   const remoteAudioRef = useRef(null) // For playing remote audio from calls
+  const activeCaptures = useRef(new Set()) // Track which cameras are actively being captured
 
   // PBX Store for WebRTC calling
   const { makeCall, isRegistered } = usePBXStore()
@@ -77,6 +78,25 @@ export default function AlarmDetail() {
   useEffect(() => {
     loadAlarmDetails()
     loadPbxConfig()
+
+    // Handle browser refresh/close - stop all captures
+    const handleBeforeUnload = () => {
+      // Use sendBeacon for reliable delivery even when page is closing
+      if (activeCaptures.current.size > 0) {
+        for (const captureKey of activeCaptures.current) {
+          const [eventId, cameraId] = captureKey.split('_').map(Number)
+          // Use sendBeacon to ensure request is sent even when page is closing
+          const url = `/api/events/${eventId}/stop-capture?camera_id=${cameraId}`
+          navigator.sendBeacon(url)
+        }
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
   }, [alarmId])
 
   // Auto-dial parking slot for call events
@@ -234,12 +254,11 @@ export default function AlarmDetail() {
     if (selectedCameraId && liveVideoRef.current) {
       const selectedCam = (filteredCameras || allCameras).find(c => c.id === selectedCameraId)
       if (selectedCam?.rtsp_url) {
-        // Don't stop previous camera's stream - let backend grace period handle it
-        // if (previousCameraIdRef.current && previousCameraIdRef.current !== selectedCameraId) {
-        //   console.log(`Switching from camera ${previousCameraIdRef.current} to ${selectedCameraId}`)
-        //   api.post(`/cameras/${previousCameraIdRef.current}/stop-stream`)
-        //     .catch(err => console.error('Failed to stop previous stream:', err))
-        // }
+        // Stop capture for previous camera if switching
+        if (previousCameraIdRef.current && previousCameraIdRef.current !== selectedCameraId) {
+          console.log(`Switching from camera ${previousCameraIdRef.current} to ${selectedCameraId}`)
+          stopCapture(previousCameraIdRef.current)
+        }
 
         // Destroy existing HLS instance before loading new stream
         if (hlsRef.current) {
@@ -247,7 +266,7 @@ export default function AlarmDetail() {
           hlsRef.current = null
         }
 
-        // Load the new camera stream
+        // Load the new camera stream (this will start the capture)
         loadLiveStream(selectedCameraId)
 
         // Update the previous camera ref
@@ -256,8 +275,7 @@ export default function AlarmDetail() {
     }
 
     return () => {
-      // Only stop stream when component unmounts (not when camera changes)
-      // We use a flag to distinguish between camera change and unmount
+      // Stop all captures when component unmounts
       const currentCameraId = previousCameraIdRef.current
 
       if (hlsRef.current) {
@@ -265,14 +283,11 @@ export default function AlarmDetail() {
         hlsRef.current = null
       }
 
-      // NOTE: Don't stop stream on component unmount
-      // Let the backend's 30-second grace period and reference counting handle cleanup
-      // This allows streams to persist when navigating between Dashboard and Alarm Detail
-      // if (currentCameraId) {
-      //   console.log('Component unmounting, stopping stream for camera', currentCameraId)
-      //   api.post(`/cameras/${currentCameraId}/stop-stream`)
-      //     .catch(err => console.error('Failed to stop stream:', err))
-      // }
+      // Stop capture when leaving alarm detail page
+      if (currentCameraId) {
+        console.log('Component unmounting, stopping capture for camera', currentCameraId)
+        stopCapture(currentCameraId)
+      }
     }
   }, [selectedCameraId, allCameras])
 
@@ -482,6 +497,35 @@ export default function AlarmDetail() {
     }
   }
 
+  const stopCapture = async (cameraId) => {
+    if (!alarm || !alarm.event_id) return
+
+    const captureKey = `${alarm.event_id}_${cameraId}`
+    if (activeCaptures.current.has(captureKey)) {
+      console.log(`Stopping capture for camera ${cameraId}, event ${alarm.event_id}`)
+      try {
+        await api.post(`/events/${alarm.event_id}/stop-capture`, null, {
+          params: {
+            camera_id: cameraId
+          }
+        })
+        activeCaptures.current.delete(captureKey)
+        console.log(`Capture stopped for ${captureKey}`)
+      } catch (err) {
+        console.error('Failed to stop capture:', err)
+      }
+    }
+  }
+
+  const stopAllCaptures = async () => {
+    const promises = []
+    for (const captureKey of activeCaptures.current) {
+      const [eventId, cameraId] = captureKey.split('_').map(Number)
+      promises.push(stopCapture(cameraId))
+    }
+    await Promise.all(promises)
+  }
+
   const loadLiveStream = async (cameraId) => {
     if (!liveVideoRef.current) return
 
@@ -492,20 +536,7 @@ export default function AlarmDetail() {
       const statusResponse = await api.get(`/cameras/${cameraId}/stream-status`)
       console.log('Stream status:', statusResponse.data)
 
-      // Auto-capture this live view in the background (don't wait for it)
-      // Trigger capture regardless of whether stream was already running or not
-      if (alarm && alarm.event_id) {
-        console.log(`Auto-capturing live view for camera ${cameraId}, event ${alarm.event_id}`)
-        api.post(`/events/${alarm.event_id}/capture-live-view`, null, {
-          params: {
-            camera_id: cameraId,
-            duration_seconds: 10
-          }
-        }).catch(err => {
-          console.error('Failed to auto-capture live view:', err)
-          // Don't show error to user - this is a background operation
-        })
-      }
+      // Note: Capture will be started after video confirms playing (see 'playing' event listener below)
 
       // If stream is already running, just load it immediately (no polling needed)
       if (statusResponse.data.is_streaming && statusResponse.data.stream_url) {
@@ -576,7 +607,37 @@ export default function AlarmDetail() {
         videoEl.addEventListener('loadedmetadata', () => console.log('Video metadata loaded'))
         videoEl.addEventListener('loadeddata', () => console.log('Video data loaded'))
         videoEl.addEventListener('canplay', () => console.log('Video can play'))
-        videoEl.addEventListener('playing', () => console.log('Video playback started successfully'))
+        videoEl.addEventListener('playing', () => {
+          console.log('Video playback started successfully')
+
+          // Start capturing after video confirms playing (5 second delay to ensure RTSP is stable)
+          setTimeout(() => {
+            if (alarm && alarm.event_id) {
+              const captureKey = `${alarm.event_id}_${cameraId}`
+              if (!activeCaptures.current.has(captureKey)) {
+                console.log(`[Single] Starting capture for camera ${cameraId}, event ${alarm.event_id}`)
+                api.post(`/events/${alarm.event_id}/start-capture`, null, {
+                  params: {
+                    camera_id: cameraId
+                  }
+                }).then(() => {
+                  activeCaptures.current.add(captureKey)
+                  console.log(`[Single] Capture started for ${captureKey}`)
+                }).catch(err => {
+                  // If error is "already capturing", that's OK - it was started on Monitoring page
+                  if (err.response?.status === 200) {
+                    activeCaptures.current.add(captureKey)
+                    console.log(`[Single] Capture already in progress for ${captureKey} (started from Monitoring)`)
+                  } else {
+                    console.error('[Single] Failed to start capture:', err)
+                  }
+                })
+              } else {
+                console.log(`[Single] Capture already tracked for ${captureKey}`)
+              }
+            }
+          }, 5000)
+        }, { once: true })
         videoEl.addEventListener('error', (e) => console.error('Video element error:', e))
 
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
@@ -633,6 +694,38 @@ export default function AlarmDetail() {
         // Native HLS support (Safari)
         liveVideoRef.current.src = streamUrl
         liveVideoRef.current.play().catch(e => console.log('Autoplay prevented:', e))
+
+        // Start capture after video confirms playing
+        liveVideoRef.current.addEventListener('playing', () => {
+          console.log('[Single Safari] Video playback started successfully')
+
+          // Start capturing after video confirms playing (5 second delay to ensure RTSP is stable)
+          setTimeout(() => {
+            if (alarm && alarm.event_id) {
+              const captureKey = `${alarm.event_id}_${cameraId}`
+              if (!activeCaptures.current.has(captureKey)) {
+                console.log(`[Single Safari] Starting capture for camera ${cameraId}, event ${alarm.event_id}`)
+                api.post(`/events/${alarm.event_id}/start-capture`, null, {
+                  params: {
+                    camera_id: cameraId
+                  }
+                }).then(() => {
+                  activeCaptures.current.add(captureKey)
+                  console.log(`[Single Safari] Capture started for ${captureKey}`)
+                }).catch(err => {
+                  if (err.response?.status === 200) {
+                    activeCaptures.current.add(captureKey)
+                    console.log(`[Single Safari] Capture already in progress for ${captureKey}`)
+                  } else {
+                    console.error('[Single Safari] Failed to start capture:', err)
+                  }
+                })
+              } else {
+                console.log(`[Single Safari] Capture already tracked for ${captureKey}`)
+              }
+            }
+          }, 5000)
+        }, { once: true })
       }
     } catch (error) {
       console.error('Failed to load live stream:', error)
@@ -669,19 +762,7 @@ export default function AlarmDetail() {
                 const readyTime = (attempt + 1) * 500
                 console.log(`✓ Camera ${cam.id} (${cam.name}) ready after ${readyTime}ms - loading now!`)
 
-                // Auto-capture this live view in the background (don't wait for it)
-                if (alarm && alarm.event_id) {
-                  console.log(`Auto-capturing grid live view for camera ${cam.id}, event ${alarm.event_id}`)
-                  api.post(`/events/${alarm.event_id}/capture-live-view`, null, {
-                    params: {
-                      camera_id: cam.id,
-                      duration_seconds: 10
-                    }
-                  }).catch(err => {
-                    console.error('Failed to auto-capture grid live view:', err)
-                    // Don't show error to user - this is a background operation
-                  })
-                }
+                // Note: Capture will be started after video confirms playing (see loadSingleGridCamera)
 
                 // Load this camera immediately
                 await loadSingleGridCamera(cam)
@@ -737,6 +818,27 @@ export default function AlarmDetail() {
         videoEl.play().catch(e => console.log(`Autoplay prevented for camera ${cam.id}:`, e))
       })
 
+      // Start capture after video confirms playing
+      videoEl.addEventListener('playing', () => {
+        console.log(`[Grid] Video playing for camera ${cam.id}, starting capture in 5 seconds...`)
+        setTimeout(() => {
+          const captureKey = `${alarm.event_id}_${cam.id}`
+          if (!activeCaptures.current.has(captureKey) && alarm && alarm.event_id) {
+            console.log(`[Grid] Starting capture for camera ${cam.id}, event ${alarm.event_id}`)
+            api.post(`/events/${alarm.event_id}/start-capture`, null, {
+              params: {
+                camera_id: cam.id
+              }
+            }).then(() => {
+              activeCaptures.current.add(captureKey)
+              console.log(`[Grid] Capture started for ${captureKey}`)
+            }).catch(err => {
+              console.error(`[Grid] Failed to start capture for camera ${cam.id}:`, err)
+            })
+          }
+        }, 5000)
+      }, { once: true })
+
       hls.on(window.Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
           console.error(`HLS fatal error for camera ${cam.id}:`, data)
@@ -762,6 +864,27 @@ export default function AlarmDetail() {
       console.log(`Using native HLS for camera ${cam.id}`)
       videoEl.src = `/streams/${cam.id}/playlist.m3u8`
       videoEl.play().catch(e => console.log('Autoplay prevented:', e))
+
+      // Start capture after video confirms playing
+      videoEl.addEventListener('playing', () => {
+        console.log(`[Grid] Video playing for camera ${cam.id}, starting capture in 5 seconds...`)
+        setTimeout(() => {
+          const captureKey = `${alarm.event_id}_${cam.id}`
+          if (!activeCaptures.current.has(captureKey) && alarm && alarm.event_id) {
+            console.log(`[Grid] Starting capture for camera ${cam.id}, event ${alarm.event_id}`)
+            api.post(`/events/${alarm.event_id}/start-capture`, null, {
+              params: {
+                camera_id: cam.id
+              }
+            }).then(() => {
+              activeCaptures.current.add(captureKey)
+              console.log(`[Grid] Capture started for ${captureKey}`)
+            }).catch(err => {
+              console.error(`[Grid] Failed to start capture for camera ${cam.id}:`, err)
+            })
+          }
+        }, 5000)
+      }, { once: true })
     }
   }
 
@@ -792,6 +915,9 @@ export default function AlarmDetail() {
     }
 
     try {
+      // Stop all active captures before resolving
+      await stopAllCaptures()
+
       await api.put(`/alarms/${alarmId}/resolve`, {
         notes,
         resolution,
@@ -820,6 +946,9 @@ export default function AlarmDetail() {
     try {
       // Get the event_id from the alarm
       if (alarm?.event_id) {
+        // Stop all active captures before escalating
+        await stopAllCaptures()
+
         // Pass escalation notes (NOT the current notes textarea value)
         await api.put(`/events/${alarm.event_id}/escalate`, {
           notes: escalateNotes.trim() || undefined
@@ -858,6 +987,9 @@ export default function AlarmDetail() {
 
   const handleConfirmHold = async () => {
     try {
+      // Stop all active captures before holding
+      await stopAllCaptures()
+
       await api.put(`/alarms/${alarmId}/hold`, {
         notes: holdNotes.trim() || undefined
       })
@@ -1102,6 +1234,9 @@ export default function AlarmDetail() {
 
   const handleBackToDashboard = async () => {
     try {
+      // Stop all active captures before leaving
+      await stopAllCaptures()
+
       // Only revert if alarm is still active and coming from dashboard (not history)
       if (alarm.status === 'active' && !fromHistory) {
         await api.put(`/alarms/${alarmId}/revert-to-pending`)

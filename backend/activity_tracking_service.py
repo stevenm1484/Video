@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from models import VideoAccount, Camera, AlarmEvent
-from email_notification_service import EmailNotificationService
+from email_service import EmailService
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +19,7 @@ class ActivityTrackingService:
 
     def __init__(self, db: Session):
         self.db = db
-        self.email_service = EmailNotificationService()
+        self.email_service = EmailService()
 
     def increment_event_count(self, camera_id: int):
         """

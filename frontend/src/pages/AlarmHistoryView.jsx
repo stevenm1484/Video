@@ -216,6 +216,9 @@ export default function AlarmHistoryView() {
                       <video
                         src={`/${path}`}
                         controls
+                        autoPlay
+                        loop
+                        muted
                         style={styles.mediaVideo}
                       />
                     ) : (
@@ -529,8 +532,8 @@ const styles = {
     whiteSpace: 'pre-wrap'
   },
   capturesList: {
-    display: 'flex',
-    flexDirection: 'column',
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 1fr)',
     gap: '1rem'
   },
   captureItem: {

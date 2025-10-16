@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import Camera, AlarmEvent, VideoAccount, ActivityLog
+from models import Camera, AlarmEvent, VideoAccount, ActivityLog, InboundEvent
 from pathlib import Path
 import logging
 import json as json_module
@@ -113,12 +113,31 @@ class CustomSMTPHandler:
             account = db.query(VideoAccount).filter(VideoAccount.id == camera.account_id).first()
             now = datetime.utcnow()
 
+            # LOG INBOUND EVENT (before any filtering)
+            # This captures ALL events regardless of snooze/disarm status
+            inbound_event = InboundEvent(
+                camera_id=camera.id,
+                account_id=camera.account_id,
+                timestamp=now,
+                source_type="smtp",
+                source_identifier=recipient_email,
+                media_type="unknown",  # Will be updated later if event is processed
+                outcome="pending",  # Will be updated based on processing
+                raw_payload={"mail_from": envelope.mail_from, "rcpt_to": recipient_email}
+            )
+            db.add(inbound_event)
+            db.flush()  # Get the ID without committing
+
             # OPTIMIZATION: Check disarm/snooze status BEFORE parsing email content
             # This prevents wasting CPU on parsing large emails with attachments that will be ignored
 
             # Check camera snooze
             if camera.snoozed_until and camera.snoozed_until > now:
                 logger.info(f"[SMTP] Camera {camera.id} is snoozed until {camera.snoozed_until}, skipping event creation")
+
+                # Update inbound event outcome
+                inbound_event.outcome = "snoozed"
+                inbound_event.outcome_reason = f"Camera snoozed until {camera.snoozed_until}"
 
                 # Create activity log for snoozed event
                 activity_log = ActivityLog(
@@ -135,11 +154,37 @@ class CustomSMTPHandler:
                 db.add(activity_log)
                 db.commit()
 
+                # Broadcast filtered inbound event
+                try:
+                    await self.websocket_manager.broadcast({
+                        "type": "inbound_event",
+                        "event": {
+                            "id": inbound_event.id,
+                            "camera_id": inbound_event.camera_id,
+                            "camera_name": camera.name,
+                            "account_id": inbound_event.account_id,
+                            "account_name": account.name if account else "Unknown",
+                            "timestamp": inbound_event.timestamp.isoformat(),
+                            "source_type": inbound_event.source_type,
+                            "source_identifier": inbound_event.source_identifier,
+                            "media_type": "unknown",
+                            "outcome": inbound_event.outcome,
+                            "outcome_reason": inbound_event.outcome_reason,
+                            "alarm_event_id": None
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"[SMTP] Error broadcasting filtered inbound event: {e}")
+
                 return '250 Message accepted for delivery'
 
             # Check account snooze
             if account and account.snoozed_until and account.snoozed_until > now:
                 logger.info(f"[SMTP] Account {account.id} is snoozed until {account.snoozed_until}, skipping event creation")
+
+                # Update inbound event outcome
+                inbound_event.outcome = "snoozed"
+                inbound_event.outcome_reason = f"Account snoozed until {account.snoozed_until}"
 
                 # Create activity log for snoozed event
                 activity_log = ActivityLog(
@@ -156,14 +201,40 @@ class CustomSMTPHandler:
                 db.add(activity_log)
                 db.commit()
 
+                # Broadcast filtered inbound event
+                try:
+                    await self.websocket_manager.broadcast({
+                        "type": "inbound_event",
+                        "event": {
+                            "id": inbound_event.id,
+                            "camera_id": inbound_event.camera_id,
+                            "camera_name": camera.name,
+                            "account_id": inbound_event.account_id,
+                            "account_name": account.name if account else "Unknown",
+                            "timestamp": inbound_event.timestamp.isoformat(),
+                            "source_type": inbound_event.source_type,
+                            "source_identifier": inbound_event.source_identifier,
+                            "media_type": "unknown",
+                            "outcome": inbound_event.outcome,
+                            "outcome_reason": inbound_event.outcome_reason,
+                            "alarm_event_id": None
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"[SMTP] Error broadcasting filtered inbound event: {e}")
+
                 return '250 Message accepted for delivery'
 
             # Check if camera is disarmed
             if self.is_camera_disarmed(camera, account):
                 logger.info(f"[SMTP] Camera {camera.id} is currently disarmed, skipping event creation")
 
-                # Create activity log for disarmed event
+                # Update inbound event outcome
+                inbound_event.outcome = "disarmed"
                 disarm_reason = "manually disarmed" if camera.manual_arm_state is False else "disarmed by schedule"
+                inbound_event.outcome_reason = f"Camera {disarm_reason}"
+
+                # Create activity log for disarmed event
                 activity_log = ActivityLog(
                     camera_id=camera.id,
                     account_id=camera.account_id,
@@ -177,6 +248,28 @@ class CustomSMTPHandler:
                 )
                 db.add(activity_log)
                 db.commit()
+
+                # Broadcast filtered inbound event
+                try:
+                    await self.websocket_manager.broadcast({
+                        "type": "inbound_event",
+                        "event": {
+                            "id": inbound_event.id,
+                            "camera_id": inbound_event.camera_id,
+                            "camera_name": camera.name,
+                            "account_id": inbound_event.account_id,
+                            "account_name": account.name if account else "Unknown",
+                            "timestamp": inbound_event.timestamp.isoformat(),
+                            "source_type": inbound_event.source_type,
+                            "source_identifier": inbound_event.source_identifier,
+                            "media_type": "unknown",
+                            "outcome": inbound_event.outcome,
+                            "outcome_reason": inbound_event.outcome_reason,
+                            "alarm_event_id": None
+                        }
+                    })
+                except Exception as e:
+                    logger.error(f"[SMTP] Error broadcasting filtered inbound event: {e}")
 
                 return '250 Message accepted for delivery'
 
@@ -268,6 +361,36 @@ class CustomSMTPHandler:
             db.add(event)
             db.commit()
             db.refresh(event)
+
+            # Update inbound event with success outcome and link to alarm event
+            inbound_event.outcome = "pending_created"
+            inbound_event.outcome_reason = "AlarmEvent created successfully"
+            inbound_event.alarm_event_id = event.id
+            inbound_event.media_type = media_type
+            inbound_event.media_paths = media_paths
+            db.commit()
+
+            # Broadcast inbound event to WebSocket clients
+            try:
+                await self.websocket_manager.broadcast({
+                    "type": "inbound_event",
+                    "event": {
+                        "id": inbound_event.id,
+                        "camera_id": inbound_event.camera_id,
+                        "camera_name": camera.name,
+                        "account_id": inbound_event.account_id,
+                        "account_name": account.name if account else "Unknown",
+                        "timestamp": inbound_event.timestamp.isoformat(),
+                        "source_type": inbound_event.source_type,
+                        "source_identifier": inbound_event.source_identifier,
+                        "media_type": inbound_event.media_type,
+                        "outcome": inbound_event.outcome,
+                        "outcome_reason": inbound_event.outcome_reason,
+                        "alarm_event_id": inbound_event.alarm_event_id
+                    }
+                })
+            except Exception as e:
+                logger.error(f"[SMTP] Error broadcasting inbound event: {e}")
 
             # Activity Tracking: Increment event counters and check thresholds
             try:

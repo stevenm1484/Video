@@ -12,7 +12,8 @@ def log_audit_action(
     username: str = None,
     event_id: int = None,
     alarm_id: int = None,
-    details: dict = None
+    details: dict = None,
+    session_id: str = None
 ):
     """
     Log an audit action to alarm_audit_log table
@@ -25,6 +26,7 @@ def log_audit_action(
         event_id: Related event ID
         alarm_id: Related alarm ID
         details: Additional context as dictionary
+        session_id: Unique ID for grouping actions from same alarm handling session
 
     Actions:
         - event_received: Event arrived from camera
@@ -48,11 +50,12 @@ def log_audit_action(
             user_id=user_id,
             username=username,
             details=details,
+            session_id=session_id,
             timestamp=datetime.utcnow()
         )
         db.add(audit_log)
         db.commit()
-        print(f"[AUDIT] {action} - User: {username or user_id} - Event: {event_id} - Alarm: {alarm_id}")
+        print(f"[AUDIT] {action} - User: {username or user_id} - Event: {event_id} - Alarm: {alarm_id} - Session: {session_id}")
     except Exception as e:
         print(f"[AUDIT ERROR] Failed to log {action}: {e}")
         db.rollback()
